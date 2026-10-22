@@ -203,16 +203,22 @@ def build_chart(state):
             for a in anchors]
 
     fig, ax = plt.subplots(figsize=(7.2, 2.8), dpi=100)
-    ax.plot(days, fines, marker="o", color="#2f6fed", linewidth=2,
+    # Тёмная тема графика под тёмный интерфейс приложения.
+    fig.patch.set_facecolor("#1a2130")
+    ax.set_facecolor("#1a2130")
+    ax.plot(days, fines, marker="o", color="#6f9bff", linewidth=2,
             markersize=4)
-    ax.set_title("Штраф после каждого вечера", fontsize=11)
-    ax.set_ylabel("минуты")
-    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title("Штраф после каждого вечера", fontsize=11, color="#e6eaf2")
+    ax.set_ylabel("минуты", color="#8b94a7")
+    ax.grid(True, linestyle="--", alpha=0.3, color="#3a4356")
+    ax.tick_params(colors="#8b94a7")
+    for spine in ax.spines.values():
+        spine.set_color("#3a4356")
     fig.autofmt_xdate(rotation=30)
     fig.tight_layout()
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png")
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -228,63 +234,64 @@ PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
 <style>
-  :root { color-scheme: light; }
+  :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-    background: #f3f5f9; margin: 0; padding: 24px 16px; color: #1c2333;
+    background: #10151f; margin: 0; padding: 24px 16px; color: #e6eaf2;
   }
   .wrap { max-width: 860px; margin: 0 auto; }
   h1 { margin: 0 0 4px; font-size: 26px; }
-  .subtitle { color: #6b7280; margin: 0 0 20px; font-size: 14px; }
+  .subtitle { color: #8b94a7; margin: 0 0 20px; font-size: 14px; }
   .cards { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
   .card {
-    background: #fff; border-radius: 12px; padding: 14px 18px;
-    box-shadow: 0 1px 3px rgba(16,24,40,.08); flex: 1 1 180px;
+    background: #1a2130; border-radius: 12px; padding: 14px 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.4); flex: 1 1 180px;
   }
-  .card .label { font-size: 12px; color: #6b7280; text-transform: uppercase;
+  .card .label { font-size: 12px; color: #8b94a7; text-transform: uppercase;
                  letter-spacing: .04em; }
   .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .green  { color: #1a9c4b; }
-  .yellow { color: #d9a400; }
-  .red    { color: #d43a3a; }
-  .panel { background: #fff; border-radius: 12px; padding: 18px;
-           box-shadow: 0 1px 3px rgba(16,24,40,.08); margin-bottom: 20px; }
+  .green  { color: #3ecf7a; }
+  .yellow { color: #e8c341; }
+  .red    { color: #f06a6a; }
+  .panel { background: #1a2130; border-radius: 12px; padding: 18px;
+           box-shadow: 0 1px 3px rgba(0,0,0,.4); margin-bottom: 20px; }
   img.chart { max-width: 100%; height: auto; display: block; margin: 0 auto; }
   form.inline-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
-  label.field { font-size: 13px; color: #6b7280; display: flex;
+  label.field { font-size: 13px; color: #8b94a7; display: flex;
                 flex-direction: column; gap: 4px; }
   input[type=date], input[type=time] {
-    padding: 8px 10px; border: 1px solid #cbd2dc; border-radius: 8px;
-    font-size: 14px;
+    padding: 8px 10px; border: 1px solid #3a4356; border-radius: 8px;
+    font-size: 14px; background: #232b3d; color: #e6eaf2;
   }
   button, .btn {
     background: #2f6fed; color: #fff; border: none; border-radius: 8px;
     padding: 9px 16px; font-size: 14px; cursor: pointer; min-width: 60px;
   }
-  button:hover, .btn:hover { background: #2456c4; }
+  button:hover, .btn:hover { background: #4b82f5; }
   .table-scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 14px;
           min-width: 640px; }
-  th { text-align: left; color: #6b7280; font-size: 12px;
+  th { text-align: left; color: #8b94a7; font-size: 12px;
        text-transform: uppercase; letter-spacing: .04em;
-       padding: 8px 10px; border-bottom: 2px solid #e5e9f0; }
-  td { padding: 9px 10px; border-bottom: 1px solid #eef1f6; vertical-align: middle; }
-  tr:nth-child(even) td { background: #fafbfd; }
+       padding: 8px 10px; border-bottom: 2px solid #333d52; }
+  td { padding: 9px 10px; border-bottom: 1px solid #262f42; vertical-align: middle; }
+  tr:nth-child(even) td { background: #1d2536; }
   .mono { font-family: "SF Mono", Consolas, "Courier New", monospace; }
   .badge-night {
-    background: #eef2ff; color: #4053c9; border-radius: 999px;
+    background: #2b3560; color: #aab8ff; border-radius: 999px;
     font-size: 11px; padding: 2px 8px; margin-left: 6px; white-space: nowrap;
   }
-  .delta-pos { color: #d43a3a; }
-  .delta-neg { color: #1a9c4b; }
+  .delta-pos { color: #f06a6a; }
+  .delta-neg { color: #3ecf7a; }
   form.edit { display: inline-flex; gap: 6px; align-items: center; }
   form.edit input[type=time] { width: 96px; padding: 5px 6px; }
   form.edit button { padding: 5px 10px; min-width: 60px; }
   form.del { display: inline; }
-  form.del button { background: #d43a3a; padding: 5px 12px; min-width: 60px; }
-  form.del button:hover { background: #b32f2f; }
-  .empty { color: #6b7280; font-style: italic; padding: 12px 0; }
+  form.del button { background: #c94040; padding: 5px 12px; min-width: 60px; }
+  form.del button:hover { background: #e05555; }
+  .empty { color: #8b94a7; font-style: italic; padding: 12px 0; }
+  a.more { color: #6f9bff; }
 </style>
 </head>
 <body>
@@ -370,7 +377,7 @@ PAGE = """<!DOCTYPE html>
     </div>
     {% if not show_all and rows|length < total_count %}
     <div style="text-align:center; margin-top:16px;">
-      <a href="?show_all=1" style="color:#2f6fed; text-decoration:none;">
+      <a class="more" href="?show_all=1" style="text-decoration:none;">
         Показать еще ({{ total_count - rows|length }} записей)
       </a>
     </div>
@@ -399,7 +406,8 @@ def index():
     entries = [{"day": r["day"], "bedtime": r["bedtime"]} for r in db_rows]
     state = compute_state(entries)
     total_count = len(state)
-    view = state if show_all else state[-10:]
+    # История показывается от последней даты к более ранним.
+    view = (state if show_all else state[-10:])[::-1]
 
     rows = []
     for r in view:
