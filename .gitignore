@@ -16,3 +16,4 @@ history.csv
 .idea/
 .DS_Store
 Thumbs.db
+*.bundle
