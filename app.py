@@ -14,7 +14,9 @@
 import base64
 import io
 import os
+import shutil
 import sqlite3
+import sys
 from datetime import date as _date, datetime, time as _time, timedelta
 
 from flask import Flask, redirect, request
@@ -24,10 +26,38 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+
+def _data_dir():
+    """Каталог для пользовательских данных (sleep.db и т.п.).
+
+    Обычный запуск (python app.py / run.bat): рядом со скриптом.
+    PyInstaller-сборка (.exe): рядом с .exe — данные пользователя должны
+    переживать перезапуск и обновление программы.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 DB_PATH = os.environ.get(
     "SLEEPTRACKER_DB",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sleep.db"),
+    os.path.join(_data_dir(), "sleep.db"),
 )
+
+# Совместимость со старыми сборками (--onefile): раньше база создавалась в
+# каталоге запуска. Если рядом с exe её нет, а в текущей папке она есть —
+# переносим её к exe, чтобы история не выглядела пустой.
+if getattr(sys, "frozen", False):
+    _CWD_DB = os.path.join(os.getcwd(), "sleep.db")
+    if (os.path.isfile(_CWD_DB)
+            and os.path.abspath(_CWD_DB) != os.path.abspath(DB_PATH)
+            and not os.path.exists(DB_PATH)):
+        try:
+            shutil.copyfile(_CWD_DB, DB_PATH)
+        except OSError:
+            pass
+
+VERSION = "0.4.1"           # MAJ.MIN.PATCH — синхронно с README.md
 
 IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
 MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
@@ -137,55 +167,80 @@ def compute_state(entries):
         anchor = evening_anchor(day, bedtime)
         parsed.append((anchor, day, bedtime))
 
-    # Хронологический порядок; дубликаты (одинаковый anchor) сливаются —
-    # оставляем последнюю введённую запись.
-    merged = {}
-    for anchor, day, bedtime in sorted(parsed, key=lambda x: (x[0], x[1], x[2])):
-        merged[anchor] = (day, bedtime)
+    # Нормализация записей внутри одного календарного дня:
+    #  * В одну дату отход ко сну может быть только один — вечерние записи
+    #    (12:00-23:59) одного и того же дня не сосуществуют: оставляем
+    #    последнюю по времени отбоя.
+    #  * За один вечер допустимы ДВЕ записи: вечерняя (день D, 12:00-23:59)
+    #    и ночная (день D+1, 00:00-11:59). Они относятся к разным датам в БД
+    #    (разные сущности) и не перезаписывают друг друга.
+    #  * Ночных записей одного вечера может быть несколько (например, правка
+    #    «15.10 23:40 -> 15.10 01:19» при уже существующей соседней ночи);
+    #    в расчёте участвует самая поздняя — она и есть фактический отбой.
+    evenings = {}          # night_key -> {"lvl0": rec | None, "lvl1": [recs]}
+    order = {}             # night_key -> порядок первого появления
+    for idx, (anchor, day, bedtime) in enumerate(sorted(parsed,
+                                                       key=lambda x: (x[0], x[1], x[2]))):
+        key = night_key(anchor)
+        bucket = evenings.setdefault(key, {"lvl0": None, "lvl1": []})
+        order.setdefault(key, len(order))
+        if level_of(anchor) == 0:
+            bucket["lvl0"] = (anchor, day, bedtime)   # последняя побеждает
+        else:
+            bucket["lvl1"].append((anchor, day, bedtime))
+
+    def _sorted_keys(keys):
+        return sorted(keys, key=lambda k: (k, order[k]))
 
     result = []
     fine = 0
     last_evening = None
     burn_today = 0
 
-    for anchor in sorted(merged):
-        day, bedtime = merged[anchor]
-        lvl = level_of(anchor)
-        key = night_key(anchor)
-        minutes_of_day = anchor % 1440
+    for key in _sorted_keys(evenings.keys()):
+        bucket = evenings[key]
+        records = []
+        if bucket["lvl0"] is not None:
+            records.append(bucket["lvl0"])
+        if bucket["lvl1"]:
+            records.append(bucket["lvl1"][-1])       # самая поздняя ночь
 
-        if key != last_evening:
-            last_evening = key
-            burn_today = 0
+        for anchor, day, bedtime in sorted(records, key=lambda x: x[0]):
+            lvl = level_of(anchor)
+            minutes_of_day = anchor % 1440
 
-        # Для ночной записи (00:00-11:59) время считается продолжением
-        # предыдущего вечера: минуты от полуночи + 1440.
-        effective_minutes = minutes_of_day + (1440 if lvl == 1 else 0)
-        delta = effective_minutes - IDEAL_MINUTES
-        fine_before = fine
+            if key != last_evening:
+                last_evening = key
+                burn_today = 0
 
-        capped = False
-        if delta > 0:
-            fine += delta
-        elif delta < 0:
-            burn = min(-delta, MAX_BURN_PER_DAY - burn_today, fine)
-            burn = max(burn, 0)
-            if -delta > MAX_BURN_PER_DAY or (-delta > burn and fine_before > 0):
-                capped = True
-            burn_today += burn
-            fine -= burn
+            # Для ночной записи (00:00-11:59) время считается продолжением
+            # предыдущего вечера: минуты от полуночи + 1440.
+            effective_minutes = minutes_of_day + (1440 if lvl == 1 else 0)
+            delta = effective_minutes - IDEAL_MINUTES
+            fine_before = fine
 
-        result.append({
-            "day": day,
-            "input_day": day,
-            "input_bedtime": bedtime,
-            "shown_bedtime": bedtime,
-            "level": lvl,
-            "delta": delta,
-            "fine_before": fine_before,
-            "fine_after": fine,
-            "capped": capped,
-        })
+            capped = False
+            if delta > 0:
+                fine += delta
+            elif delta < 0:
+                burn = min(-delta, MAX_BURN_PER_DAY - burn_today, fine)
+                burn = max(burn, 0)
+                if -delta > MAX_BURN_PER_DAY or (-delta > burn and fine_before > 0):
+                    capped = True
+                burn_today += burn
+                fine -= burn
+
+            result.append({
+                "day": day,
+                "input_day": day,
+                "input_bedtime": bedtime,
+                "shown_bedtime": bedtime,
+                "level": lvl,
+                "delta": delta,
+                "fine_before": fine_before,
+                "fine_after": fine,
+                "capped": capped,
+            })
 
     return result
 
@@ -297,7 +352,7 @@ PAGE = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>🌙 Учёт сна</h1>
-  <p class="subtitle">Отбой вовремя — штраф меньше. Идеальное время: 23:00.</p>
+  <p class="subtitle">Отбой вовремя — штраф меньше. Идеальное время: 23:00. Версия {{ version }}</p>
 
   <div class="cards">
     <div class="card">
@@ -349,10 +404,8 @@ PAGE = """<!DOCTYPE html>
       <tbody>
         {% for r in rows %}
         <tr>
-          <td>{{ r.day_human }}</td>
+          <td>{{ r.day_human }}{% if r.level == 1 %} <span class="badge-night">ночь</span>{% endif %}</td>
           <td>
-            <span class="mono">{{ r.shown_bedtime }}</span>
-            {% if r.level == 1 %}<span class="badge-night">ночь</span>{% endif %}
             <form class="edit" method="post" action="/save">
               <input type="hidden" name="old_day" value="{{ r.input_day }}">
               <input type="hidden" name="old_bedtime" value="{{ r.input_bedtime }}">
@@ -411,7 +464,13 @@ def index():
 
     rows = []
     for r in view:
-        d = datetime.strptime(r["input_day"], "%Y-%m-%d")
+        # Ночная запись (отбой 00:00-11:59) относится к вечеру ПРЕДЫДУЩЕГО
+        # дня: в истории она показывается под своей эффективной датой вечера.
+        if r["level"] == 1:
+            disp_day, _, _ = effective_evening(r["input_day"], r["input_bedtime"])
+        else:
+            disp_day = r["input_day"]
+        d = datetime.strptime(disp_day, "%Y-%m-%d")
         day_human = d.strftime("%d.%m.%Y") + " (" + DAY_MAP[d.strftime("%a")] + ")"
         delta = r["delta"]
         if delta > 0:
@@ -449,6 +508,7 @@ def index():
         total_count=total_count,
         show_all=show_all,
         today=_date.today().isoformat(),
+        version=VERSION,
     )
     return html
 
@@ -467,22 +527,42 @@ def save():
     conn = get_db()
     try:
         if old_day and old_bedtime:
-            # Инлайн-правка существующей записи.
+            # Инлайн-правка существующей записи: удаляем старую строку.
             conn.execute(
                 "DELETE FROM sleep_entries WHERE day=? AND bedtime=?",
                 (old_day, old_bedtime))
-            # Если правка затрагивает ночную запись, помечаем вечер как
-            # «ночь удалена», чтобы новая запись не перезаписала ночную
-            # запись соседнего вечера.
+            # Помечаем вечер старой записи в deleted_nights, если она была
+            # единственной в своём вечере и её ярус меняется при правке
+            # (например «15.10 23:40 -> 15.10 01:19»). Это защищает от
+            # перезаписи ночной записи соседнего вечера.
             try:
                 old_anchor = evening_anchor(old_day, old_bedtime)
-                if level_of(old_anchor) == 1:
+                still_there = conn.execute(
+                    "SELECT 1 FROM sleep_entries WHERE day=? LIMIT 1",
+                    (old_day,)).fetchone()
+                if not still_there and level_of(old_anchor) != level_of(
+                        evening_anchor(day, bedtime)):
                     conn.execute(
                         "INSERT OR REPLACE INTO deleted_nights (evening_day) "
                         "VALUES (?)",
                         (night_key(old_anchor),))
             except ValueError:
                 pass
+
+        # Одна дата — один отбой: не допускаем двух ВЕЧЕРНИХ записей
+        # (12:00-23:59) одной календарной даты. Ночная запись этой же даты —
+        # это продолжение ДРУГОГО (предыдущего) вечера, её не трогаем.
+        new_lvl = level_of(evening_anchor(day, bedtime))
+        clash = conn.execute(
+            "SELECT bedtime FROM sleep_entries WHERE day=?", (day,)).fetchall()
+        for row in clash:
+            other = row["bedtime"]
+            if (other == bedtime or
+                    level_of(evening_anchor(day, other)) == new_lvl):
+                conn.execute(
+                    "DELETE FROM sleep_entries WHERE day=? AND bedtime=?",
+                    (day, other))
+
         conn.execute(
             "INSERT OR REPLACE INTO sleep_entries (day, bedtime) VALUES (?, ?)",
             (day, bedtime))
@@ -527,7 +607,10 @@ def healthz():
         return "error: %s" % exc, 500
 
 
-init_db()
+def _main():
+    init_db()
+    app.run(host="127.0.0.1", port=5000, debug=False)
+
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    _main()

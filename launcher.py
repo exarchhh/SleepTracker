@@ -40,7 +40,8 @@ def open_browser_later(url, port):
 
 
 def run_server():
-    from app import app
+    from app import app, init_db
+    init_db()
     port = _find_free_port()
     url = "http://127.0.0.1:%d/" % port
     print("SleepTracker запущен: %s" % url)
@@ -52,11 +53,13 @@ def run_server():
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--import":
-        if len(args) < 2:
-            print("Использование: sleeptracker --import <файл.csv>")
+        rest = [a for a in args[1:] if a != "--dry-run"]
+        dry_run = "--dry-run" in args[1:]
+        if len(rest) < 1:
+            print("Использование: sleeptracker --import <файл.csv> [--dry-run]")
             return 2
         from import_history import import_csv
-        return import_csv(args[1])
+        return import_csv(rest[0], dry_run=dry_run)
     run_server()
     return 0
 
