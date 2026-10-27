@@ -1,2 +1,4 @@
-flask>=3.0
-matplotlib>=3.7
+# Runtime-зависимости SleepTracker (точные версии для воспроизводимых сборок).
+# Python 3.8.6 (Windows 7): matplotlib 3.7.x — последняя ветка, совместимая с 3.8.
+flask==3.0.3
+matplotlib==3.7.5

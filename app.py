@@ -57,7 +57,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.5.0"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.5.1"           # MAJ.MIN.PATCH — синхронно с README.md
 
 IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
 MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
