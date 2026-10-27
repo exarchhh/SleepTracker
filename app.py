@@ -51,7 +51,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.5.1"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.6.0"           # MAJ.MIN.PATCH — синхронно с README.md
 
 IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
 MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
@@ -259,8 +259,52 @@ def build_chart_data(state):
             disp_day = r["input_day"]
         d = datetime.strptime(disp_day, "%Y-%m-%d")
         chart_data.append({"date": d.strftime("%d.%m"),
+                           "full_date": d.isoformat(),
                            "fine": r["fine_after"]})
     return chart_data
+
+
+# ---------------------------------------------------------------------------
+# Расширенная статистика (только чтение state — логика штрафа не меняется)
+# ---------------------------------------------------------------------------
+
+def compute_streak(state):
+    """Количество дней подряд без штрафа (delta <= 0), считая от конца."""
+    streak = 0
+    for r in reversed(state):
+        if r["delta"] <= 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def compute_avg_bedtime_month(state):
+    """Среднее время отбоя за последние 30 календарных дней ("HH:MM")."""
+    if not state:
+        return None
+    last_day = max(datetime.strptime(r["input_day"], "%Y-%m-%d")
+                   for r in state)
+    cutoff = last_day - timedelta(days=29)
+    minutes = []
+    for r in state:
+        d = datetime.strptime(r["input_day"], "%Y-%m-%d")
+        if d >= cutoff:
+            h, m = divmod(_bedtime_to_minutes(r["input_bedtime"]), 60)
+            # Отбой после полуночи показываем как продолжение предыдущего
+            # вечера: 25:30 вместо 01:30 — иначе среднее исказится.
+            if r["level"] == 1:
+                h += 24
+            minutes.append(h * 60 + m)
+    if not minutes:
+        return None
+    avg = round(sum(minutes) / len(minutes))
+    return "%02d:%02d" % divmod(avg, 60)
+
+
+def _bedtime_to_minutes(bedtime):
+    hh, mm = bedtime.split(":")
+    return int(hh) * 60 + int(mm)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +341,16 @@ PAGE = """<!DOCTYPE html>
   .red    { color: #f06a6a; }
   .panel { background: #1a2130; border-radius: 12px; padding: 18px;
            box-shadow: 0 1px 3px rgba(0,0,0,.4); margin-bottom: 20px; }
+  .chart-panel { min-height: 400px; }
+  .chart-box { position: relative; height: 360px; }
+  .period-selector { display: flex; gap: 8px; flex-wrap: wrap;
+                     margin-bottom: 14px; }
+  .period-selector button {
+    background: #2a3550; color: #8b94a7; border: none; border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; cursor: pointer; min-width: 0;
+  }
+  .period-selector button:hover { background: #3a4560; }
+  .period-selector button.active { background: #2f6fed; color: #fff; }
   #sleepChart { width: 100% !important; }
   form.inline-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
   label.field { font-size: 13px; color: #8b94a7; display: flex;
@@ -353,11 +407,32 @@ PAGE = """<!DOCTYPE html>
       <div class="label">Последний отбой</div>
       <div class="value mono">{{ last_bedtime or "—" }}</div>
     </div>
+    <div class="card">
+      <div class="label">Текущий стрик</div>
+      <div class="value {{ 'green' if current_streak > 0 else '' }}">
+        {{ current_streak }} {{ streak_word }}
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Средний отбой (мес)</div>
+      <div class="value mono">{{ avg_bedtime_month or "—" }}</div>
+    </div>
   </div>
 
-  <div class="panel">
+  <div class="panel chart-panel">
     {% if chart_data_json %}
-      <canvas id="sleepChart" height="260"></canvas>
+    <div class="period-selector">
+      <button data-period="week">Неделя</button>
+      <button data-period="2weeks">2 недели</button>
+      <button data-period="month">Месяц</button>
+      <button data-period="3months">3 месяца</button>
+      <button data-period="6months">Полгода</button>
+      <button data-period="year">Год</button>
+      <button data-period="calendar_year" class="active">Календарный год</button>
+    </div>
+    <div class="chart-box">
+      <canvas id="sleepChart"></canvas>
+    </div>
     {% else %}
       <div class="empty">Добавьте первую запись, чтобы увидеть график.</div>
     {% endif %}
@@ -427,33 +502,61 @@ PAGE = """<!DOCTYPE html>
 <script>
   const chartData = {{ chart_data_json | safe }};
 
-  new Chart(document.getElementById('sleepChart'), {
+  // --- Фильтрация данных по выбранному периоду -------------------------
+  // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
+  // остаётся короткая метка "DD.MM".
+  function toDate(s) { return new Date(s + 'T00:00:00'); }
+
+  function filterByPeriod(period) {
+    if (!chartData.length) return chartData;
+    const dates = chartData.map(d => toDate(d.full_date));
+    const last = dates.reduce((a, b) => a > b ? a : b);
+    let from, to;
+    if (period === 'calendar_year') {
+      const y = last.getFullYear();
+      from = new Date(y, 0, 1);            // 1 января года последней записи
+      to = new Date(y, 11, 31, 23, 59, 59); // 31 декабря
+    } else {
+      const days = { week: 7, '2weeks': 14, month: 30, '3months': 90,
+                     '6months': 180, year: 365 }[period] || 365;
+      from = new Date(last);
+      from.setDate(from.getDate() - days + 1);
+      to = last;
+    }
+    const out = chartData.filter((d, i) => dates[i] >= from && dates[i] <= to);
+    return out.length ? out : chartData.slice(-1); // не показывать пустой график
+  }
+
+  const gradientColors = v => {          // зелёный (0) -> красный (большие)
+    if (v <= 0)   return '#3ecf7a';
+    if (v <= 100) return '#8ed173';
+    if (v <= 200) return '#e8c341';
+    if (v <= 300) return '#ef9a5f';
+    return '#f06a6a';
+  };
+
+  const initial = filterByPeriod('calendar_year');
+  const chart = new Chart(document.getElementById('sleepChart'), {
     type: 'line',
     data: {
-      labels: chartData.map(d => d.date),
+      labels: initial.map(d => d.date),
       datasets: [{
         label: 'Штраф, мин',
-        data: chartData.map(d => d.fine),
+        data: initial.map(d => d.fine),
         tension: 0.3,               // плавная (сглаженная) линия
         pointRadius: 0,             // без точек на холсте
         pointHitRadius: 10,         // но наведение работает
         borderWidth: 2,
         fill: false,
         segment: {                  // цвет каждого сегмента по значению штрафа
-          borderColor: ctx => {
-            const v = Math.max(ctx.p0.parsed.y, ctx.p1.parsed.y);
-            if (v <= 0)   return '#3ecf7a';
-            if (v <= 100) return '#8ed173';
-            if (v <= 200) return '#e8c341';
-            if (v <= 300) return '#ef9a5f';
-            return '#f06a6a';
-          }
+          borderColor: ctx => gradientColors(
+            Math.max(ctx.p0.parsed.y, ctx.p1.parsed.y))
         }
       }]
     },
     options: {
       responsive: true,
-      maintainAspectRatio: false,
+      maintainAspectRatio: false,   // занимать всю высоту .chart-box
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -480,6 +583,19 @@ PAGE = """<!DOCTYPE html>
         }
       }
     }
+  });
+
+  // --- Переключение периода ------------------------------------------------
+  document.querySelectorAll('.period-selector button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.period-selector button')
+              .forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const filtered = filterByPeriod(btn.dataset.period);
+      chart.data.labels = filtered.map(d => d.date);
+      chart.data.datasets[0].data = filtered.map(d => d.fine);
+      chart.update();
+    });
   });
 </script>
 {% endif %}
@@ -545,6 +661,16 @@ def index():
     chart_data = build_chart_data(state)
     chart_data_json = json.dumps(chart_data) if chart_data else ""
 
+    current_streak = compute_streak(state)
+    avg_bedtime_month = compute_avg_bedtime_month(state)
+    n = current_streak % 10
+    if n == 1 and current_streak != 11:
+        streak_word = "день"
+    elif 2 <= n <= 4 and not (12 <= current_streak % 100 <= 14):
+        streak_word = "дня"
+    else:
+        streak_word = "дней"
+
     from jinja2 import Template
     html = Template(PAGE).render(
         rows=rows,
@@ -553,6 +679,9 @@ def index():
         fine_class=fine_class,
         last_bedtime=last_bedtime,
         total_count=total_count,
+        current_streak=current_streak,
+        streak_word=streak_word,
+        avg_bedtime_month=avg_bedtime_month,
         show_all=show_all,
         today=_date.today().isoformat(),
         version=VERSION,
