@@ -11,8 +11,7 @@
     потому что уникальный ключ записи — (day, bedtime).
 """
 
-import base64
-import io
+import json
 import os
 import shutil
 import sqlite3
@@ -20,11 +19,6 @@ import sys
 from datetime import date as _date, datetime, time as _time, timedelta
 
 from flask import Flask, redirect, request
-
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
 
 
 def _data_dir():
@@ -246,36 +240,27 @@ def compute_state(entries):
 
 
 # ---------------------------------------------------------------------------
-# График
+# Данные для графика (Chart.js)
 # ---------------------------------------------------------------------------
 
-def build_chart(state):
-    if not state:
-        return ""
-    anchors = [evening_anchor(r["input_day"], r["input_bedtime"]) for r in state]
-    fines = [r["fine_after"] for r in state]
-    days = [datetime.fromordinal(a // 1440 + _date(1970, 1, 1).toordinal())
-            for a in anchors]
+def build_chart_data(state):
+    """Список [{'date': 'DD.MM', 'fine': N}, ...] для фронтенда (Chart.js).
 
-    fig, ax = plt.subplots(figsize=(7.2, 2.8), dpi=100)
-    # Тёмная тема графика под тёмный интерфейс приложения.
-    fig.patch.set_facecolor("#1a2130")
-    ax.set_facecolor("#1a2130")
-    ax.plot(days, fines, marker="o", color="#6f9bff", linewidth=2,
-            markersize=4)
-    ax.set_title("Штраф после каждого вечера", fontsize=11, color="#e6eaf2")
-    ax.set_ylabel("минуты", color="#8b94a7")
-    ax.grid(True, linestyle="--", alpha=0.3, color="#3a4356")
-    ax.tick_params(colors="#8b94a7")
-    for spine in ax.spines.values():
-        spine.set_color("#3a4356")
-    fig.autofmt_xdate(rotation=30)
-    fig.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    Каждая запись state -> точка на графике: эффективная дата вечера
+    (ночные сдвиги относятся к предыдущему вечеру) и штраф после вечера.
+    Логика расчёта штрафа не затрагивается — только подготовка данных.
+    """
+    chart_data = []
+    for r in state:
+        if r["level"] == 1:
+            disp_day, _, _ = effective_evening(r["input_day"],
+                                               r["input_bedtime"])
+        else:
+            disp_day = r["input_day"]
+        d = datetime.strptime(disp_day, "%Y-%m-%d")
+        chart_data.append({"date": d.strftime("%d.%m"),
+                           "fine": r["fine_after"]})
+    return chart_data
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +273,7 @@ PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -311,7 +297,7 @@ PAGE = """<!DOCTYPE html>
   .red    { color: #f06a6a; }
   .panel { background: #1a2130; border-radius: 12px; padding: 18px;
            box-shadow: 0 1px 3px rgba(0,0,0,.4); margin-bottom: 20px; }
-  img.chart { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  #sleepChart { width: 100% !important; }
   form.inline-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
   label.field { font-size: 13px; color: #8b94a7; display: flex;
                 flex-direction: column; gap: 4px; }
@@ -370,8 +356,8 @@ PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="panel">
-    {% if chart_png %}
-      <img class="chart" src="data:image/png;base64,{{ chart_png }}" alt="График штрафа">
+    {% if chart_data_json %}
+      <canvas id="sleepChart" height="260"></canvas>
     {% else %}
       <div class="empty">Добавьте первую запись, чтобы увидеть график.</div>
     {% endif %}
@@ -437,6 +423,66 @@ PAGE = """<!DOCTYPE html>
     {% endif %}
   </div>
 </div>
+{% if chart_data_json %}
+<script>
+  const chartData = {{ chart_data_json | safe }};
+
+  new Chart(document.getElementById('sleepChart'), {
+    type: 'line',
+    data: {
+      labels: chartData.map(d => d.date),
+      datasets: [{
+        label: 'Штраф, мин',
+        data: chartData.map(d => d.fine),
+        tension: 0.3,               // плавная (сглаженная) линия
+        pointRadius: 0,             // без точек на холсте
+        pointHitRadius: 10,         // но наведение работает
+        borderWidth: 2,
+        fill: false,
+        segment: {                  // цвет каждого сегмента по значению штрафа
+          borderColor: ctx => {
+            const v = Math.max(ctx.p0.parsed.y, ctx.p1.parsed.y);
+            if (v <= 0)   return '#3ecf7a';
+            if (v <= 100) return '#8ed173';
+            if (v <= 200) return '#e8c341';
+            if (v <= 300) return '#ef9a5f';
+            return '#f06a6a';
+          }
+        }
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {                 // стандартные тултипы: дата + значение
+          backgroundColor: '#232b3d',
+          titleColor: '#e6eaf2',
+          bodyColor: '#e6eaf2',
+          borderColor: '#3a4356',
+          borderWidth: 1,
+          callbacks: {
+            label: ctx => ' Штраф: ' + ctx.parsed.y + ' мин'
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#3a4356' },
+          ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: '#3a4356' },
+          ticks: { color: '#8b94a7' }
+        }
+      }
+    }
+  });
+</script>
+{% endif %}
 </body>
 </html>
 """
@@ -496,12 +542,13 @@ def index():
     fine_class = "green" if current_fine == 0 else (
         "yellow" if current_fine < 300 else "red")
 
-    chart_png = build_chart(state)
+    chart_data = build_chart_data(state)
+    chart_data_json = json.dumps(chart_data) if chart_data else ""
 
     from jinja2 import Template
     html = Template(PAGE).render(
         rows=rows,
-        chart_png=chart_png,
+        chart_data_json=chart_data_json,
         current_fine=current_fine,
         fine_class=fine_class,
         last_bedtime=last_bedtime,
