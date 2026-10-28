@@ -51,7 +51,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.6.1"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.6.2"           # MAJ.MIN.PATCH — синхронно с README.md
 
 IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
 MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
@@ -254,7 +254,7 @@ def build_chart_data(state):
     Логика расчёта штрафа не затрагивается — только подготовка данных.
     """
     chart_data = []
-    for r in state:
+    for idx, r in enumerate(state):
         if r["level"] == 1:
             disp_day, _, _ = effective_evening(r["input_day"],
                                                r["input_bedtime"])
@@ -271,9 +271,17 @@ def build_chart_data(state):
             mins += 1440
         bedtime_min = mins
         chart_data.append({"date": d.strftime("%d.%m"),
-                           "full_date": d.isoformat(),
+                           "full_date": d.strftime("%Y-%m-%d"),
                            "fine": r["fine_after"],
-                           "bedtime_min": bedtime_min})
+                           "bedtime_min": bedtime_min,
+                           "_order": idx})
+    # Гарантируем сортировку по дате и хронологии внутри вечера
+    # (вечерняя запись lvl0 раньше ночной lvl1). Chart.js рисует линию
+    # только по отсортированным данным; state уже отсортирован, но
+    # стабильная перестраховка не меняет значений.
+    chart_data.sort(key=lambda p: (p["full_date"], p["_order"]))
+    for p in chart_data:
+        del p["_order"]
     return chart_data
 
 
@@ -521,6 +529,9 @@ PAGE = """<!DOCTYPE html>
 <script>
   const chartData = {{ chart_data_json | safe }};
   console.log("Chart data:", chartData);   // отладка: структура данных графика
+  console.log("First 5:", chartData.slice(0, 5));
+  console.log("Last 5:", chartData.slice(-5));
+  console.log("Total count:", chartData.length);
 
   // --- Фильтрация данных по выбранному периоду -------------------------
   // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
@@ -541,16 +552,20 @@ PAGE = """<!DOCTYPE html>
     let from, to;
     if (period === 'calendar_year') {
       const y = last.getFullYear();
-      from = new Date(y, 0, 1);            // 1 января года последней записи
-      to = new Date(y, 11, 31, 23, 59, 59); // 31 декабря
-    } else {
-      const days = PERIOD_DAYS[period] || 365;
-      from = new Date(last);
-      from.setDate(from.getDate() - days + 1);
-      to = last;
+      from = new Date(y, 0, 1);             // 1 января года последней записи
+      to = new Date(y + 1, 0, 1);           // exclusive-граница: 1 января сл. г.
+      const out = chartData.filter((d, i) => dates[i] >= from && dates[i] < to);
+      // Если в этом календарном году ещё нет записей (например, история
+      // началась в декабре) — показываем всю историю вместо одной точки,
+      // иначе график вырождается в одиночную точку без линии.
+      return out.length ? out : chartData.slice();
     }
+    const days = PERIOD_DAYS[period] || 365;
+    from = new Date(last);
+    from.setDate(from.getDate() - days + 1);
+    to = last;
     const out = chartData.filter((d, i) => dates[i] >= from && dates[i] <= to);
-    return out.length ? out : chartData.slice(-1); // не показывать пустой график
+    return out.length ? out : chartData.slice(); // не показывать пустой график
   }
 
   // --- Динамический средний отбой (следует за выбранным периодом) -------
