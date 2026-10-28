@@ -11,8 +11,7 @@
     потому что уникальный ключ записи — (day, bedtime).
 """
 
-import base64
-import io
+import json
 import os
 import shutil
 import sqlite3
@@ -20,11 +19,6 @@ import sys
 from datetime import date as _date, datetime, time as _time, timedelta
 
 from flask import Flask, redirect, request
-
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
 
 
 def _data_dir():
@@ -57,7 +51,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.5.0"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.6.2"           # MAJ.MIN.PATCH — синхронно с README.md
 
 IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
 MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
@@ -246,36 +240,98 @@ def compute_state(entries):
 
 
 # ---------------------------------------------------------------------------
-# График
+# Данные для графика (Chart.js)
 # ---------------------------------------------------------------------------
 
-def build_chart(state):
+def build_chart_data(state):
+    """Список [{'date': 'DD.MM', 'full_date': ISO, 'fine': N,
+    'bedtime_min': M}, ...] для фронтенда (Chart.js).
+
+    Каждая запись state -> точка на графике: эффективная дата вечера
+    (ночные сдвиги относятся к предыдущему вечеру) и штраф после вечера.
+    bedtime_min — минуты отбоя относительно полудня предыдущего дня
+    (послеполуночный отбой даёт >720), нужен для динамического среднего.
+    Логика расчёта штрафа не затрагивается — только подготовка данных.
+    """
+    chart_data = []
+    for idx, r in enumerate(state):
+        if r["level"] == 1:
+            disp_day, _, _ = effective_evening(r["input_day"],
+                                               r["input_bedtime"])
+        else:
+            disp_day = r["input_day"]
+        d = datetime.strptime(disp_day, "%Y-%m-%d")
+        hh, mm = map(int, r["input_bedtime"].split(":"))
+        # Отбой после полуночи — продолжение предыдущего вечера:
+        # нормализуем к единой шкале вечера (23:00 -> 1380, 01:30 -> 1530),
+        # как в compute_state. Среднее по таким минутам корректно для
+        # ночных сдвигов; перенос через полночь обрабатывает JS.
+        mins = hh * 60 + mm
+        if mins < 720:  # 00:00-11:59
+            mins += 1440
+        bedtime_min = mins
+        chart_data.append({"date": d.strftime("%d.%m"),
+                           "full_date": d.strftime("%Y-%m-%d"),
+                           "fine": r["fine_after"],
+                           "bedtime_min": bedtime_min,
+                           "_order": idx})
+    # Гарантируем сортировку по дате и хронологии внутри вечера
+    # (вечерняя запись lvl0 раньше ночной lvl1). Chart.js рисует линию
+    # только по отсортированным данным; state уже отсортирован, но
+    # стабильная перестраховка не меняет значений.
+    chart_data.sort(key=lambda p: (p["full_date"], p["_order"]))
+    for p in chart_data:
+        del p["_order"]
+    return chart_data
+
+
+# ---------------------------------------------------------------------------
+# Расширенная статистика (только чтение state — логика штрафа не меняется)
+# ---------------------------------------------------------------------------
+
+def compute_streak(state):
+    """Количество дней подряд без штрафа (delta <= 0), считая от конца."""
+    streak = 0
+    for r in reversed(state):
+        if r["delta"] <= 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def compute_avg_bedtime_period(state, days=None):
+    """Среднее время отбоя за период ("HH:MM").
+
+    days=None -> весь доступный диапазон записей (календарный год —
+    базовое значение для динамической карточки; JS пересчитывает при
+    переключении периода). Иначе — последние `days` календарных дней
+    от самой поздней записи. Логика расчёта штрафа не затрагивается.
+    """
     if not state:
-        return ""
-    anchors = [evening_anchor(r["input_day"], r["input_bedtime"]) for r in state]
-    fines = [r["fine_after"] for r in state]
-    days = [datetime.fromordinal(a // 1440 + _date(1970, 1, 1).toordinal())
-            for a in anchors]
+        return None
+    last_day = max(datetime.strptime(r["input_day"], "%Y-%m-%d")
+                   for r in state)
+    cutoff = (last_day - timedelta(days=days - 1)) if days else None
+    minutes = []
+    for r in state:
+        d = datetime.strptime(r["input_day"], "%Y-%m-%d")
+        if cutoff is None or d >= cutoff:
+            h, m = divmod(_bedtime_to_minutes(r["input_bedtime"]), 60)
+            # Отбой после полуночи показываем как продолжение предыдущего
+            # вечера: 25:30 вместо 01:30 — иначе среднее исказится.
+            if r["level"] == 1:
+                h += 24
+            minutes.append(h * 60 + m)
+    if not minutes:
+        return None
+    avg = round(sum(minutes) / len(minutes))
+    return "%02d:%02d" % divmod(avg, 60)
 
-    fig, ax = plt.subplots(figsize=(7.2, 2.8), dpi=100)
-    # Тёмная тема графика под тёмный интерфейс приложения.
-    fig.patch.set_facecolor("#1a2130")
-    ax.set_facecolor("#1a2130")
-    ax.plot(days, fines, marker="o", color="#6f9bff", linewidth=2,
-            markersize=4)
-    ax.set_title("Штраф после каждого вечера", fontsize=11, color="#e6eaf2")
-    ax.set_ylabel("минуты", color="#8b94a7")
-    ax.grid(True, linestyle="--", alpha=0.3, color="#3a4356")
-    ax.tick_params(colors="#8b94a7")
-    for spine in ax.spines.values():
-        spine.set_color("#3a4356")
-    fig.autofmt_xdate(rotation=30)
-    fig.tight_layout()
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+def _bedtime_to_minutes(bedtime):
+    hh, mm = bedtime.split(":")
+    return int(hh) * 60 + int(mm)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +344,7 @@ PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -311,7 +368,17 @@ PAGE = """<!DOCTYPE html>
   .red    { color: #f06a6a; }
   .panel { background: #1a2130; border-radius: 12px; padding: 18px;
            box-shadow: 0 1px 3px rgba(0,0,0,.4); margin-bottom: 20px; }
-  img.chart { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  .chart-panel { min-height: 400px; }
+  .chart-box { position: relative; height: 360px; }
+  .period-selector { display: flex; gap: 8px; flex-wrap: wrap;
+                     margin-bottom: 14px; }
+  .period-selector button {
+    background: #2a3550; color: #8b94a7; border: none; border-radius: 8px;
+    padding: 7px 14px; font-size: 13px; cursor: pointer; min-width: 0;
+  }
+  .period-selector button:hover { background: #3a4560; }
+  .period-selector button.active { background: #2f6fed; color: #fff; }
+  #sleepChart { width: 100% !important; }
   form.inline-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
   label.field { font-size: 13px; color: #8b94a7; display: flex;
                 flex-direction: column; gap: 4px; }
@@ -367,11 +434,32 @@ PAGE = """<!DOCTYPE html>
       <div class="label">Последний отбой</div>
       <div class="value mono">{{ last_bedtime or "—" }}</div>
     </div>
+    <div class="card">
+      <div class="label">Текущий стрик</div>
+      <div class="value {{ 'green' if current_streak > 0 else '' }}">
+        {{ current_streak }} {{ streak_word }}
+      </div>
+    </div>
+    <div class="card">
+      <div class="label" id="avgBedtimeLabel">Средний отбой</div>
+      <div class="value mono" id="avgBedtimeValue">{{ avg_bedtime or "—" }}</div>
+    </div>
   </div>
 
-  <div class="panel">
-    {% if chart_png %}
-      <img class="chart" src="data:image/png;base64,{{ chart_png }}" alt="График штрафа">
+  <div class="panel chart-panel">
+    {% if chart_data_json %}
+    <div class="period-selector">
+      <button data-period="week">Неделя</button>
+      <button data-period="2weeks">2 недели</button>
+      <button data-period="month">Месяц</button>
+      <button data-period="3months">3 месяца</button>
+      <button data-period="6months">Полгода</button>
+      <button data-period="year">Год</button>
+      <button data-period="calendar_year" class="active">Календарный год</button>
+    </div>
+    <div class="chart-box">
+      <canvas id="sleepChart"></canvas>
+    </div>
     {% else %}
       <div class="empty">Добавьте первую запись, чтобы увидеть график.</div>
     {% endif %}
@@ -437,6 +525,155 @@ PAGE = """<!DOCTYPE html>
     {% endif %}
   </div>
 </div>
+{% if chart_data_json %}
+<script>
+  const chartData = {{ chart_data_json | safe }};
+  console.log("Chart data:", chartData);   // отладка: структура данных графика
+  console.log("First 5:", chartData.slice(0, 5));
+  console.log("Last 5:", chartData.slice(-5));
+  console.log("Total count:", chartData.length);
+
+  // --- Фильтрация данных по выбранному периоду -------------------------
+  // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
+  // остаётся короткая метка "DD.MM".
+  function toDate(s) { return new Date(s + 'T00:00:00'); }
+
+  const PERIOD_DAYS = { week: 7, '2weeks': 14, month: 30, '3months': 90,
+                        '6months': 180, year: 365 };
+  const PERIOD_LABELS = { week: 'за неделю', '2weeks': 'за 2 недели',
+                          month: 'за месяц', '3months': 'за 3 месяца',
+                          '6months': 'за полгода', year: 'за год',
+                          calendar_year: 'за календарный год' };
+
+  function filterByPeriod(period) {
+    if (!chartData || !chartData.length) return [];
+    const dates = chartData.map(d => toDate(d.full_date));
+    const last = dates.reduce((a, b) => a > b ? a : b);
+    let from, to;
+    if (period === 'calendar_year') {
+      const y = last.getFullYear();
+      from = new Date(y, 0, 1);             // 1 января года последней записи
+      to = new Date(y + 1, 0, 1);           // exclusive-граница: 1 января сл. г.
+      const out = chartData.filter((d, i) => dates[i] >= from && dates[i] < to);
+      // Если в этом календарном году ещё нет записей (например, история
+      // началась в декабре) — показываем всю историю вместо одной точки,
+      // иначе график вырождается в одиночную точку без линии.
+      return out.length ? out : chartData.slice();
+    }
+    const days = PERIOD_DAYS[period] || 365;
+    from = new Date(last);
+    from.setDate(from.getDate() - days + 1);
+    to = last;
+    const out = chartData.filter((d, i) => dates[i] >= from && dates[i] <= to);
+    return out.length ? out : chartData.slice(); // не показывать пустой график
+  }
+
+  // --- Динамический средний отбой (следует за выбранным периодом) -------
+  // bedtime_min — минуты по шкале вечера (23:00 = 1380, как в compute_state;
+  // послеполуночный отбой даёт > 1440). Если среднее перенесено за полночь,
+  // выводим его как время следующего дня ("25:30" -> "01:30").
+  function computeAverageBedtime(periodData) {
+    if (!periodData || !periodData.length) return null;
+    const sum = periodData.reduce((acc, d) => acc + d.bedtime_min, 0);
+    let avg = Math.round(sum / periodData.length);
+    if (avg >= 1440) avg -= 1440;   // перенос через полночь -> следующий день
+    return String(Math.floor(avg / 60)).padStart(2, '0') + ':' +
+           String(avg % 60).padStart(2, '0');
+  }
+
+  function updateStatsCard(periodData, period) {
+    const el = document.getElementById('avgBedtimeValue');
+    const lb = document.getElementById('avgBedtimeLabel');
+    if (lb) lb.textContent = 'Средний отбой (' +
+        (PERIOD_LABELS[period] || period) + ')';
+    if (el) el.textContent = computeAverageBedtime(periodData) || '—';
+  }
+
+  const gradientColors = v => {          // зелёный (0) -> красный (большие)
+    if (v <= 0)   return '#3ecf7a';
+    if (v <= 100) return '#8ed173';
+    if (v <= 200) return '#e8c341';
+    if (v <= 300) return '#ef9a5f';
+    return '#f06a6a';
+  };
+
+  // --- Инициализация графика (с защитой: страница не должна ломаться) ---
+  let chart = null;
+  try {
+    if (typeof Chart === 'undefined') {
+      throw new Error('Chart.js не загружен (нет доступа к CDN)');
+    }
+    const initial = filterByPeriod('calendar_year');
+    chart = new Chart(document.getElementById('sleepChart'), {
+      type: 'line',
+      data: {
+        labels: initial.map(d => d.date),
+        datasets: [{
+          label: 'Штраф, мин',
+          data: initial.map(d => d.fine),
+          tension: 0.3,               // плавная (сглаженная) линия
+          pointRadius: 0,             // без точек на холсте
+          pointHitRadius: 10,         // но наведение работает
+          borderWidth: 2,
+          fill: false,
+          segment: {                  // цвет каждого сегмента по значению штрафа
+            borderColor: ctx => gradientColors(
+              Math.max(ctx.p0.parsed.y, ctx.p1.parsed.y))
+          }
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,   // занимать всю высоту .chart-box
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {                 // стандартные тултипы: дата + значение
+            backgroundColor: '#232b3d',
+            titleColor: '#e6eaf2',
+            bodyColor: '#e6eaf2',
+            borderColor: '#3a4356',
+            borderWidth: 1,
+            callbacks: {
+              label: ctx => ' Штраф: ' + ctx.parsed.y + ' мин'
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: '#3a4356' },
+            ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
+          },
+          y: {
+            beginAtZero: true,
+            grid: { color: '#3a4356' },
+            ticks: { color: '#8b94a7' }
+          }
+        }
+      }
+    });
+    updateStatsCard(initial, 'calendar_year'); // базовое значение = активный период
+  } catch (err) {
+    console.error('Ошибка инициализации графика:', err);
+  }
+
+  // --- Переключение периода ------------------------------------------------
+  document.querySelectorAll('.period-selector button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.period-selector button')
+              .forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const filtered = filterByPeriod(btn.dataset.period);
+      if (chart) {
+        chart.data.labels = filtered.map(d => d.date);
+        chart.data.datasets[0].data = filtered.map(d => d.fine);
+        chart.update();
+      }
+      updateStatsCard(filtered, btn.dataset.period);
+    });
+  });
+</script>
+{% endif %}
 </body>
 </html>
 """
@@ -496,16 +733,32 @@ def index():
     fine_class = "green" if current_fine == 0 else (
         "yellow" if current_fine < 300 else "red")
 
-    chart_png = build_chart(state)
+    chart_data = build_chart_data(state)
+    chart_data_json = json.dumps(chart_data) if chart_data else ""
+
+    current_streak = compute_streak(state)
+    # Базовое значение карточки = активный период по умолчанию
+    # (календарный год). JS пересчитывает его при переключении периода.
+    avg_bedtime = compute_avg_bedtime_period(state)
+    n = current_streak % 10
+    if n == 1 and current_streak != 11:
+        streak_word = "день"
+    elif 2 <= n <= 4 and not (12 <= current_streak % 100 <= 14):
+        streak_word = "дня"
+    else:
+        streak_word = "дней"
 
     from jinja2 import Template
     html = Template(PAGE).render(
         rows=rows,
-        chart_png=chart_png,
+        chart_data_json=chart_data_json,
         current_fine=current_fine,
         fine_class=fine_class,
         last_bedtime=last_bedtime,
         total_count=total_count,
+        current_streak=current_streak,
+        streak_word=streak_word,
+        avg_bedtime=avg_bedtime,
         show_all=show_all,
         today=_date.today().isoformat(),
         version=VERSION,
