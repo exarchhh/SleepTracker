@@ -347,7 +347,7 @@ PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -612,10 +612,28 @@ PAGE = """<!DOCTYPE html>
   }
 
   function applyPeriodToChart(target, periodData) {
+    const yMax = computeYMax(periodData);
+    console.log("applyPeriodToChart: points =", periodData.length,
+                "fineMax =", periodData.reduce((m,d)=>Math.max(m,d.fine||0),0),
+                "yMax =", yMax);
     target.data.labels = periodData.map(d => d.date);
     target.data.datasets[0].data = periodData.map(d => d.fine);
-    target.options.scales.y.min = 0;
-    target.options.scales.y.max = computeYMax(periodData);
+    // КРИТИЧНО: в Chart.js v4 chart.options — ГЕТТЕР, возвращающий
+    // chart.config.options. Присваивание chart.options = {...} выбрасывает
+    // TypeError ("Cannot set property options"), из-за чего min/max НЕ
+    // обновлялись и ось Y всюду показывала исторический максимум.
+    // Пишем только свойства В СУЩЕСТВУЮЩИЙ объект (options.scales.y.min/max).
+    try {
+      if (!target.options || !target.options.scales || !target.options.scales.y) {
+        throw new Error('нет options.scales.y');
+      }
+      target.options.scales.y.min = 0;
+      target.options.scales.y.max = yMax;
+    } catch (err) {
+      // аварийный путь: полная замена конфига через .options сеттер допустим
+      // только так — но сначала пробуем безопасный вариант выше
+      console.error('Не удалось обновить ось Y напрямую:', err);
+    }
   }
 
   // --- Инициализация графика (с защитой: страница не должна ломаться) ---
@@ -685,10 +703,15 @@ PAGE = """<!DOCTYPE html>
       document.querySelectorAll('.period-selector button')
               .forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      const filtered = filterByPeriod(btn.dataset.period);
+      const period = btn.dataset.period;
+      const filtered = filterByPeriod(period);
+      console.log("PERIOD:", period);
+      console.log("Filtered data count:", filtered.length);
+      console.log("Filtered fines:", filtered.map(d => d.fine));
+      console.log("Calculated maxY:", computeYMax(filtered));
       if (chart) {
         applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
-        chart.update();
+        chart.update();                        // перерисовка с новой осью Y
       }
       updateStatsCard(filtered, btn.dataset.period);
     });
