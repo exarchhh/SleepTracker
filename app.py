@@ -245,13 +245,15 @@ def compute_state(entries):
 
 def build_chart_data(state):
     """Список [{'date': 'DD.MM', 'full_date': ISO, 'fine': N,
-    'bedtime_min': M}, ...] для фронтенда (Chart.js).
+    'bedtime_min': M, 'delta': D}, ...] для фронтенда (Chart.js).
 
     Каждая запись state -> точка на графике: эффективная дата вечера
     (ночные сдвиги относятся к предыдущему вечеру) и штраф после вечера.
     bedtime_min — минуты отбоя относительно полудня предыдущего дня
     (послеполуночный отбой даёт >720), нужен для динамического среднего.
-    Логика расчёта штрафа не затрагивается — только подготовка данных.
+    delta — отклонение отбоя от идеала в минутах (>0 опоздание, <0 ранний
+    отбой), берётся из уже посчитанного state; логика расчёта штрафа НЕ
+    затрагивается — только обогащение данных для фронтенда (тултипы).
     """
     chart_data = []
     for idx, r in enumerate(state):
@@ -274,6 +276,7 @@ def build_chart_data(state):
                            "full_date": d.strftime("%Y-%m-%d"),
                            "fine": r["fine_after"],
                            "bedtime_min": bedtime_min,
+                           "delta": r.get("delta", 0),
                            "_order": idx})
     # Гарантируем сортировку по дате и хронологии внутри вечера
     # (вечерняя запись lvl0 раньше ночной lvl1). Chart.js рисует линию
@@ -597,6 +600,24 @@ PAGE = """<!DOCTYPE html>
     return '#f06a6a';
   };
 
+  // --- Динамическая ось Y: масштаб по отфильтрованному периоду -----------
+  // min всегда 0 (штраф неотрицателен); max = максимум fine в выборке
+  // + запас 15% (округление вверх до кратных 10), чтобы линия не прилипала
+  // к верхней границе. Если максимум 0 — фиксированный max = 100.
+  function computeYMax(periodData) {
+    const maxFine = periodData.reduce(
+        (m, d) => Math.max(m, d.fine || 0), 0);
+    if (maxFine === 0) return 100;
+    return Math.ceil(maxFine * 1.15 / 10) * 10;
+  }
+
+  function applyPeriodToChart(target, periodData) {
+    target.data.labels = periodData.map(d => d.date);
+    target.data.datasets[0].data = periodData.map(d => d.fine);
+    target.options.scales.y.min = 0;
+    target.options.scales.y.max = computeYMax(periodData);
+  }
+
   // --- Инициализация графика (с защитой: страница не должна ломаться) ---
   let chart = null;
   try {
@@ -645,7 +666,8 @@ PAGE = """<!DOCTYPE html>
             ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
           },
           y: {
-            beginAtZero: true,
+            min: 0,                     // динамический масштаб по периоду
+            max: computeYMax(initial),  // (см. computeYMax)
             grid: { color: '#3a4356' },
             ticks: { color: '#8b94a7' }
           }
@@ -665,8 +687,7 @@ PAGE = """<!DOCTYPE html>
       btn.classList.add('active');
       const filtered = filterByPeriod(btn.dataset.period);
       if (chart) {
-        chart.data.labels = filtered.map(d => d.date);
-        chart.data.datasets[0].data = filtered.map(d => d.fine);
+        applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
         chart.update();
       }
       updateStatsCard(filtered, btn.dataset.period);
