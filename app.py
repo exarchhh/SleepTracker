@@ -531,10 +531,6 @@ PAGE = """<!DOCTYPE html>
 {% if chart_data_json %}
 <script>
   const chartData = {{ chart_data_json | safe }};
-  console.log("Chart data:", chartData);   // отладка: структура данных графика
-  console.log("First 5:", chartData.slice(0, 5));
-  console.log("Last 5:", chartData.slice(-5));
-  console.log("Total count:", chartData.length);
 
   // --- Фильтрация данных по выбранному периоду -------------------------
   // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
@@ -601,12 +597,15 @@ PAGE = """<!DOCTYPE html>
   };
 
   // --- Динамическая ось Y: масштаб по отфильтрованному периоду -----------
-  // min = 0 (или чуть ниже минимума периода — см. computeYBounds):
-  // штраф неотрицателен, но если весь период лежит высоко (например,
-  // 2700-2800), старт от 0 делал линию почти горизонтальной у вершины.
-  // max = максимум fine выборки + запас 15% (округление вверх до кратных
-  // 10), чтобы линия не прилипала к верхней границе. Если максимум 0 —
-  // фиксированный max = 100.
+  // Отступы считаются как 10% ОТ ДИАПАЗОНА данных (range), а не от
+  // абсолютных значений min/max: иначе при высоко расположенных данных
+  // (например, 2700-2800) ось растягивалась до ~2560-3220 и линия
+  // занимала лишь верхнюю треть графика.
+  //   range  = maxFine - minFine
+  //   pad    = range * 0.10
+  //   yMax   = maxFine + pad ; yMin = max(0, minFine - pad)
+  // Краевые случаи: пустая выборка или нулевой максимум -> {0, 100};
+  // одна точка (range = 0) -> отступ 50 минут вокруг значения.
   function computeYBounds(periodData) {
     if (!periodData || !periodData.length) return { min: 0, max: 100 };
     let maxFine = 0, minFine = Infinity;
@@ -616,19 +615,15 @@ PAGE = """<!DOCTYPE html>
       if (f < minFine) minFine = f;
     }
     if (maxFine === 0) return { min: 0, max: 100 };
-    const max = Math.ceil(maxFine * 1.15 / 10) * 10;
-    // нижняя граница: округление ВНИЗ до кратных 10 с запасом ~5%;
-    // никогда не уходим в отрицательные значения (штраф >= 0)
-    const min = Math.max(0, Math.floor(minFine * 0.95 / 10) * 10);
+    const range = maxFine - minFine;
+    const pad = range > 0 ? range * 0.10 : 50;
+    const max = Math.ceil((maxFine + pad) / 10) * 10;
+    const min = Math.max(0, Math.floor((minFine - pad) / 10) * 10);
     return { min: min, max: max };
   }
 
   function applyPeriodToChart(target, periodData) {
     const b = computeYBounds(periodData);
-    console.log("applyPeriodToChart: points =", periodData.length,
-                "fineMin =", periodData.reduce((m,d)=>Math.min(m,d.fine||0),Infinity),
-                "fineMax =", periodData.reduce((m,d)=>Math.max(m,d.fine||0),0),
-                "yMin =", b.min, "yMax =", b.max);
     target.data.labels = periodData.map(d => d.date);
     target.data.datasets[0].data = periodData.map(d => d.fine);
     // ВАЖНО: в Chart.js v4 chart.options — геттер к config.options;
@@ -713,15 +708,9 @@ PAGE = """<!DOCTYPE html>
       btn.classList.add('active');
       const period = btn.dataset.period;
       const filtered = filterByPeriod(period);
-      console.log("PERIOD:", period);
-      console.log("Filtered data count:", filtered.length);
-      console.log("Filtered fines:", filtered.map(d => d.fine));
-      console.log("Calculated maxY:", computeYBounds(filtered).max);
       if (chart) {
         applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
         chart.update();                        // перерисовка с новой осью Y
-      } else {
-        console.warn('График ещё не инициализирован — update() пропущен');
       }
       updateStatsCard(filtered, btn.dataset.period);
     });
