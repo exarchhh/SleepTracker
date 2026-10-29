@@ -51,7 +51,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.6.2"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.6.3"           # MAJ.MIN.PATCH — синхронно с README.md
 
 IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
 MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
@@ -245,13 +245,15 @@ def compute_state(entries):
 
 def build_chart_data(state):
     """Список [{'date': 'DD.MM', 'full_date': ISO, 'fine': N,
-    'bedtime_min': M}, ...] для фронтенда (Chart.js).
+    'bedtime_min': M, 'delta': D}, ...] для фронтенда (Chart.js).
 
     Каждая запись state -> точка на графике: эффективная дата вечера
     (ночные сдвиги относятся к предыдущему вечеру) и штраф после вечера.
     bedtime_min — минуты отбоя относительно полудня предыдущего дня
     (послеполуночный отбой даёт >720), нужен для динамического среднего.
-    Логика расчёта штрафа не затрагивается — только подготовка данных.
+    delta — отклонение отбоя от идеала в минутах (>0 опоздание, <0 ранний
+    отбой), берётся из уже посчитанного state; логика расчёта штрафа НЕ
+    затрагивается — только обогащение данных для фронтенда (тултипы).
     """
     chart_data = []
     for idx, r in enumerate(state):
@@ -274,6 +276,7 @@ def build_chart_data(state):
                            "full_date": d.strftime("%Y-%m-%d"),
                            "fine": r["fine_after"],
                            "bedtime_min": bedtime_min,
+                           "delta": r.get("delta", 0),
                            "_order": idx})
     # Гарантируем сортировку по дате и хронологии внутри вечера
     # (вечерняя запись lvl0 раньше ночной lvl1). Chart.js рисует линию
@@ -344,7 +347,7 @@ PAGE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -528,10 +531,6 @@ PAGE = """<!DOCTYPE html>
 {% if chart_data_json %}
 <script>
   const chartData = {{ chart_data_json | safe }};
-  console.log("Chart data:", chartData);   // отладка: структура данных графика
-  console.log("First 5:", chartData.slice(0, 5));
-  console.log("Last 5:", chartData.slice(-5));
-  console.log("Total count:", chartData.length);
 
   // --- Фильтрация данных по выбранному периоду -------------------------
   // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
@@ -597,6 +596,50 @@ PAGE = """<!DOCTYPE html>
     return '#f06a6a';
   };
 
+  // --- Динамическая ось Y: масштаб по отфильтрованному периоду -----------
+  // Отступы считаются как 10% ОТ ДИАПАЗОНА данных (range), а не от
+  // абсолютных значений min/max: иначе при высоко расположенных данных
+  // (например, 2700-2800) ось растягивалась до ~2560-3220 и линия
+  // занимала лишь верхнюю треть графика.
+  //   range  = maxFine - minFine
+  //   pad    = range * 0.10
+  //   yMax   = maxFine + pad ; yMin = max(0, minFine - pad)
+  // Краевые случаи: пустая выборка или нулевой максимум -> {0, 100};
+  // одна точка (range = 0) -> отступ 50 минут вокруг значения.
+  function computeYBounds(periodData) {
+    if (!periodData || !periodData.length) return { min: 0, max: 100 };
+    let maxFine = 0, minFine = Infinity;
+    for (const d of periodData) {
+      const f = d.fine || 0;
+      if (f > maxFine) maxFine = f;
+      if (f < minFine) minFine = f;
+    }
+    if (maxFine === 0) return { min: 0, max: 100 };
+    const range = maxFine - minFine;
+    const pad = range > 0 ? range * 0.10 : 50;
+    const max = Math.ceil((maxFine + pad) / 10) * 10;
+    const min = Math.max(0, Math.floor((minFine - pad) / 10) * 10);
+    return { min: min, max: max };
+  }
+
+  function applyPeriodToChart(target, periodData) {
+    const b = computeYBounds(periodData);
+    target.data.labels = periodData.map(d => d.date);
+    target.data.datasets[0].data = periodData.map(d => d.fine);
+    // ВАЖНО: в Chart.js v4 chart.options — геттер к config.options;
+    // пишем только СВОЙСТВА в существующий объект (min/max), а сам
+    // options не переприсваиваем.
+    try {
+      if (!target.options || !target.options.scales || !target.options.scales.y) {
+        throw new Error('нет options.scales.y');
+      }
+      target.options.scales.y.min = b.min;
+      target.options.scales.y.max = b.max;
+    } catch (err) {
+      console.error('Не удалось обновить ось Y напрямую:', err);
+    }
+  }
+
   // --- Инициализация графика (с защитой: страница не должна ломаться) ---
   let chart = null;
   try {
@@ -645,7 +688,7 @@ PAGE = """<!DOCTYPE html>
             ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
           },
           y: {
-            beginAtZero: true,
+            ...computeYBounds(initial),   // динамический масштаб по периоду
             grid: { color: '#3a4356' },
             ticks: { color: '#8b94a7' }
           }
@@ -663,11 +706,11 @@ PAGE = """<!DOCTYPE html>
       document.querySelectorAll('.period-selector button')
               .forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      const filtered = filterByPeriod(btn.dataset.period);
+      const period = btn.dataset.period;
+      const filtered = filterByPeriod(period);
       if (chart) {
-        chart.data.labels = filtered.map(d => d.date);
-        chart.data.datasets[0].data = filtered.map(d => d.fine);
-        chart.update();
+        applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
+        chart.update();                        // перерисовка с новой осью Y
       }
       updateStatsCard(filtered, btn.dataset.period);
     });
