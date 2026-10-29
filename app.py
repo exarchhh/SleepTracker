@@ -601,37 +601,46 @@ PAGE = """<!DOCTYPE html>
   };
 
   // --- Динамическая ось Y: масштаб по отфильтрованному периоду -----------
-  // min всегда 0 (штраф неотрицателен); max = максимум fine в выборке
-  // + запас 15% (округление вверх до кратных 10), чтобы линия не прилипала
-  // к верхней границе. Если максимум 0 — фиксированный max = 100.
-  function computeYMax(periodData) {
-    const maxFine = periodData.reduce(
-        (m, d) => Math.max(m, d.fine || 0), 0);
-    if (maxFine === 0) return 100;
-    return Math.ceil(maxFine * 1.15 / 10) * 10;
+  // min = 0 (или чуть ниже минимума периода — см. computeYBounds):
+  // штраф неотрицателен, но если весь период лежит высоко (например,
+  // 2700-2800), старт от 0 делал линию почти горизонтальной у вершины.
+  // max = максимум fine выборки + запас 15% (округление вверх до кратных
+  // 10), чтобы линия не прилипала к верхней границе. Если максимум 0 —
+  // фиксированный max = 100.
+  function computeYBounds(periodData) {
+    if (!periodData || !periodData.length) return { min: 0, max: 100 };
+    let maxFine = 0, minFine = Infinity;
+    for (const d of periodData) {
+      const f = d.fine || 0;
+      if (f > maxFine) maxFine = f;
+      if (f < minFine) minFine = f;
+    }
+    if (maxFine === 0) return { min: 0, max: 100 };
+    const max = Math.ceil(maxFine * 1.15 / 10) * 10;
+    // нижняя граница: округление ВНИЗ до кратных 10 с запасом ~5%;
+    // никогда не уходим в отрицательные значения (штраф >= 0)
+    const min = Math.max(0, Math.floor(minFine * 0.95 / 10) * 10);
+    return { min: min, max: max };
   }
 
   function applyPeriodToChart(target, periodData) {
-    const yMax = computeYMax(periodData);
+    const b = computeYBounds(periodData);
     console.log("applyPeriodToChart: points =", periodData.length,
+                "fineMin =", periodData.reduce((m,d)=>Math.min(m,d.fine||0),Infinity),
                 "fineMax =", periodData.reduce((m,d)=>Math.max(m,d.fine||0),0),
-                "yMax =", yMax);
+                "yMin =", b.min, "yMax =", b.max);
     target.data.labels = periodData.map(d => d.date);
     target.data.datasets[0].data = periodData.map(d => d.fine);
-    // КРИТИЧНО: в Chart.js v4 chart.options — ГЕТТЕР, возвращающий
-    // chart.config.options. Присваивание chart.options = {...} выбрасывает
-    // TypeError ("Cannot set property options"), из-за чего min/max НЕ
-    // обновлялись и ось Y всюду показывала исторический максимум.
-    // Пишем только свойства В СУЩЕСТВУЮЩИЙ объект (options.scales.y.min/max).
+    // ВАЖНО: в Chart.js v4 chart.options — геттер к config.options;
+    // пишем только СВОЙСТВА в существующий объект (min/max), а сам
+    // options не переприсваиваем.
     try {
       if (!target.options || !target.options.scales || !target.options.scales.y) {
         throw new Error('нет options.scales.y');
       }
-      target.options.scales.y.min = 0;
-      target.options.scales.y.max = yMax;
+      target.options.scales.y.min = b.min;
+      target.options.scales.y.max = b.max;
     } catch (err) {
-      // аварийный путь: полная замена конфига через .options сеттер допустим
-      // только так — но сначала пробуем безопасный вариант выше
       console.error('Не удалось обновить ось Y напрямую:', err);
     }
   }
@@ -684,8 +693,7 @@ PAGE = """<!DOCTYPE html>
             ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
           },
           y: {
-            min: 0,                     // динамический масштаб по периоду
-            max: computeYMax(initial),  // (см. computeYMax)
+            ...computeYBounds(initial),   // динамический масштаб по периоду
             grid: { color: '#3a4356' },
             ticks: { color: '#8b94a7' }
           }
@@ -708,10 +716,12 @@ PAGE = """<!DOCTYPE html>
       console.log("PERIOD:", period);
       console.log("Filtered data count:", filtered.length);
       console.log("Filtered fines:", filtered.map(d => d.fine));
-      console.log("Calculated maxY:", computeYMax(filtered));
+      console.log("Calculated maxY:", computeYBounds(filtered).max);
       if (chart) {
         applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
         chart.update();                        // перерисовка с новой осью Y
+      } else {
+        console.warn('График ещё не инициализирован — update() пропущен');
       }
       updateStatsCard(filtered, btn.dataset.period);
     });
