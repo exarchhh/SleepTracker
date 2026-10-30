@@ -26,7 +26,9 @@
 
 | Файл | Назначение |
 |---|---|
-| `app.py` | Сервер Flask, логика штрафа (`compute_state`, `evening_anchor`, `night_key`), HTML-шаблон, роуты |
+| `app.py` | Сервер Flask, роуты, работа с БД (ядро логики вынесено в `core.py`) |
+| `core.py` | Ядро бизнес-логики: `compute_state`, `evening_anchor`, `level_of`, `night_key`, `effective_evening` |
+| `templates/index.html` | HTML/CSS/JS шаблон главной страницы (Chart.js, селектор периодов, карточки статистики) |
 | `launcher.py` | Точка входа для PyInstaller: запуск сервера или импорт CSV (`--import`) |
 | `import_history.py` | CLI-утилита импорта истории из CSV (`python import_history.py history.csv`) |
 | `run.bat` / `run.sh` | Скрипты автозапуска (Windows / Linux-macOS) |
@@ -114,7 +116,7 @@ history.csv` импортирует историю.
 
 ## Локальное развертывание из исходников (без сборки .exe)
 
-1. Установите Python 3.10+ (при установке включите «Add Python to PATH»).
+1. Установите Python 3.8.6+ (при установке включите «Add Python to PATH»).
 2. В папке с исходниками создайте виртуальное окружение и установите зависимости:
    ```bat
    python -m venv venv
