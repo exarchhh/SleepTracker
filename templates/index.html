@@ -104,6 +104,16 @@
       <div class="label" id="avgBedtimeLabel">Средний отбой</div>
       <div class="value mono" id="avgBedtimeValue">{{ avg_bedtime or "—" }}</div>
     </div>
+    <div class="card">
+      <div class="label">Макс. штраф (в периоде)</div>
+      <div class="value red" id="maxFineValue">—</div>
+      <div class="label" id="maxFineDate" style="font-size: 11px; margin-top: 4px;"></div>
+    </div>
+    <div class="card">
+      <div class="label">Лучший стрик (в периоде)</div>
+      <div class="value green" id="bestStreakValue">—</div>
+      <div class="label" id="bestStreakDates" style="font-size: 11px; margin-top: 4px;"></div>
+    </div>
   </div>
 
   <div class="panel chart-panel">
@@ -115,7 +125,8 @@
       <button data-period="3months">3 месяца</button>
       <button data-period="6months">Полгода</button>
       <button data-period="year">Год</button>
-      <button data-period="calendar_year" class="active">Календарный год</button>
+      <button data-period="calendar_year">Календарный год</button>
+      <button data-period="all_time">За всё время</button>
     </div>
     <div class="chart-box">
       <canvas id="sleepChart"></canvas>
@@ -199,10 +210,12 @@
   const PERIOD_LABELS = { week: 'за неделю', '2weeks': 'за 2 недели',
                           month: 'за месяц', '3months': 'за 3 месяца',
                           '6months': 'за полгода', year: 'за год',
-                          calendar_year: 'за календарный год' };
+                          calendar_year: 'за календарный год',
+                          all_time: 'за всё время' };
 
   function filterByPeriod(period) {
     if (!chartData || !chartData.length) return [];
+    if (period === 'all_time') return chartData.slice(); // весь массив без фильтрации
     const dates = chartData.map(d => toDate(d.full_date));
     const last = dates.reduce((a, b) => a > b ? a : b);
     let from, to;
@@ -243,6 +256,61 @@
     if (lb) lb.textContent = 'Средний отбой (' +
         (PERIOD_LABELS[period] || period) + ')';
     if (el) el.textContent = computeAverageBedtime(periodData) || '—';
+  }
+
+  // --- Динамические карточки рекордов (следуют за выбранным периодом) ---
+  // Макcимальный штраф в периоде: значение fine и дата записи. Если
+  // максимум встречается несколько раз — берём первую (самую раннюю) запись.
+  function computeMaxFine(periodData) {
+    if (!periodData || !periodData.length) return null;
+    let best = periodData[0];
+    for (const d of periodData) {
+      if (d.fine > best.fine) best = d;
+    }
+    // full_date ISO -> DD.MM.YYYY
+    const iso = String(best.full_date || '').split('-');
+    const date = iso.length === 3
+        ? iso[2] + '.' + iso[1] + '.' + iso[0] : (best.date || '');
+    return { value: best.fine, date: date };
+  }
+
+  // Лучший стрик в периоде: самая длинная последовательность ПОДРЯД
+  // идущих записей массива periodData, где delta <= 0 (без штрафа).
+  // Считаем именно соседние элементы массива (разрывы в датах НЕ
+  // прерывают стрик) — упрощённая логика по согласованному ТЗ.
+  function computeBestStreak(periodData) {
+    if (!periodData || !periodData.length) return null;
+    let bestLen = 0, bestStart = -1, curLen = 0, curStart = 0;
+    for (let i = 0; i < periodData.length; i++) {
+      if (periodData[i].delta <= 0) {
+        if (curLen === 0) curStart = i;
+        curLen++;
+        if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+      } else {
+        curLen = 0;
+      }
+    }
+    if (bestLen === 0) return { count: 0, startDate: '', endDate: '' };
+    return {
+      count: bestLen,
+      startDate: periodData[bestStart].date,               // DD.MM
+      endDate: periodData[bestStart + bestLen - 1].date    // DD.MM
+    };
+  }
+
+  function updateRecordCards(periodData) {
+    const mf = computeMaxFine(periodData);
+    const bs = computeBestStreak(periodData);
+    const mfVal = document.getElementById('maxFineValue');
+    const mfDate = document.getElementById('maxFineDate');
+    const bsVal = document.getElementById('bestStreakValue');
+    const bsDates = document.getElementById('bestStreakDates');
+    if (mfVal) mfVal.textContent = mf ? mf.value + ' мин' : '—';
+    if (mfDate) mfDate.textContent = mf ? mf.date : '';
+    if (bsVal) bsVal.textContent = bs && bs.count > 0
+        ? bs.count + ' дн.' : '—';
+    if (bsDates) bsDates.textContent = (bs && bs.count > 0)
+        ? bs.startDate + ' - ' + bs.endDate : '';
   }
 
   const gradientColors = v => {          // зелёный (0) -> красный (большие)
@@ -303,7 +371,7 @@
     if (typeof Chart === 'undefined') {
       throw new Error('Chart.js не загружен (нет доступа к CDN)');
     }
-    const initial = filterByPeriod('calendar_year');
+    const initial = filterByPeriod('all_time');
     chart = new Chart(document.getElementById('sleepChart'), {
       type: 'line',
       data: {
@@ -311,7 +379,7 @@
         datasets: [{
           label: 'Штраф, мин',
           data: initial.map(d => d.fine),
-          tension: 0.3,               // плавная (сглаженная) линия
+          tension: 0,                 // прямые линии: честные данные без ложных пиков
           pointRadius: 0,             // без точек на холсте
           pointHitRadius: 10,         // но наведение работает
           borderWidth: 2,
@@ -352,7 +420,8 @@
         }
       }
     });
-    updateStatsCard(initial, 'calendar_year'); // базовое значение = активный период
+    updateStatsCard(initial, 'all_time');     // базовое значение = активный период
+    updateRecordCards(initial);               // карточки рекордов по активному периоду
   } catch (err) {
     console.error('Ошибка инициализации графика:', err);
   }
@@ -370,6 +439,7 @@
         chart.update();                        // перерисовка с новой осью Y
       }
       updateStatsCard(filtered, btn.dataset.period);
+      updateRecordCards(filtered);
     });
   });
 </script>
