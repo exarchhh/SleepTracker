@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Регрессионные тесты ядра расчёта штрафа compute_state()."""
 
-from app import IDEAL_MINUTES, MAX_BURN_PER_DAY, compute_state
+from core import IDEAL_MINUTES, MAX_BURN_PER_DAY, compute_state
 
 
 def _by_day(state, day):

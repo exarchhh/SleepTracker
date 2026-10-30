@@ -46,7 +46,8 @@ def _reconfigure_stdout():
 
 _reconfigure_stdout()
 
-from app import DB_PATH, evening_anchor, get_db, init_db  # noqa: E402
+from app import DB_PATH, get_db, init_db
+from core import evening_anchor  # noqa: E402
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
