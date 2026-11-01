@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 """SleepTracker — локальное веб-приложение для учёта времени отбоя и штрафа.
 
-Логика штрафа:
-  * Идеальное время отбоя: 23:00 (IDEAL_MINUTES = 1380 минут от полуночи).
-  * Отбой позже 23:00 -> штраф растёт на число минут опоздания.
-  * Отбой раньше 23:00 -> штраф сгорает, но не более MAX_BURN_PER_DAY минут за вечер.
-  * Ночные сдвиги: отбой в интервале 00:00-11:59 считается продолжением
-    ПРЕДЫДУЩЕГО вечера. За один вечер допустимы две записи: вечерняя
-    (12:00-23:59) и ночная (00:00-11:59). Они не перезаписывают друг друга,
-    потому что уникальный ключ записи — (day, bedtime).
+Основная логика расчёта штрафа вынесена в модуль `core` (см. core.compute_state).
 """
 
 import json
@@ -16,9 +9,11 @@ import os
 import shutil
 import sqlite3
 import sys
-from datetime import date as _date, datetime, time as _time, timedelta
+from datetime import date as _date, datetime, timedelta
 
-from flask import Flask, redirect, request
+from flask import Flask, redirect, render_template, request
+
+import core
 
 
 def _data_dir():
@@ -51,12 +46,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.6.3"           # MAJ.MIN.PATCH — синхронно с README.md
-
-IDEAL_MINUTES = 1380        # 23:00 — идеальное время отбоя
-MAX_BURN_PER_DAY = 120      # максимум минут «сгорания» штрафа за один вечер
-DAY_MAP = {"Mon": "Пн", "Tue": "Вт", "Wed": "Ср", "Thu": "Чт",
-           "Fri": "Пт", "Sat": "Сб", "Sun": "Вс"}
+VERSION = "0.7.0"           # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
 
@@ -96,150 +86,6 @@ def init_db():
 
 
 # ---------------------------------------------------------------------------
-# Ядро логики штрафа (НЕ МЕНЯТЬ!)
-# ---------------------------------------------------------------------------
-
-def _parse(day_str, bedtime_str):
-    d = datetime.strptime(day_str, "%Y-%m-%d").date()
-    t = datetime.strptime(bedtime_str, "%H:%M").time()
-    return d, t
-
-
-def evening_anchor(day, bedtime):
-    """Абсолютный календарный момент отбоя в минутах от эпохи.
-
-    Ночной отбой (00:00-11:59) относится к дню `day`; вечерний (12:00-23:59) —
-    тоже к дню `day`. То есть anchor — это просто день + время в минутах
-    от начала суток эпохи.
-    """
-    d, t = _parse(day, bedtime)
-    minutes_of_day = t.hour * 60 + t.minute
-    days_epoch = d.toordinal() - _date(1970, 1, 1).toordinal()
-    return days_epoch * 1440 + minutes_of_day
-
-
-def level_of(anchor):
-    """Ярус записи: 0 = вечерний (12:00-23:59), 1 = ночной (00:00-11:59)."""
-    minutes_of_day = anchor % 1440
-    return 0 if minutes_of_day >= 720 else 1
-
-
-def night_key(anchor):
-    """Ключ «вечера»: все отбои с 12:00 дня D до 11:59 дня D+1."""
-    day_epoch = anchor // 1440
-    minutes_of_day = anchor % 1440
-    if minutes_of_day < 720:
-        # ночь принадлежит предыдущему вечеру
-        return day_epoch - 1
-    return day_epoch
-
-
-def effective_evening(day, bedtime):
-    """Возвращает (effective_day, anchor, eff_bedtime).
-
-    effective_day — дата «вечера», к которому относится запись;
-    eff_bedtime — то же время отбоя (HH:MM).
-    """
-    anchor = evening_anchor(day, bedtime)
-    key = night_key(anchor)
-    eff_date = _date.fromordinal(key + _date(1970, 1, 1).toordinal())
-    return eff_date.isoformat(), anchor, bedtime
-
-
-def compute_state(entries):
-    """Главная функция расчёта штрафа.
-
-    Принимает список [{'day': 'YYYY-MM-DD', 'bedtime': 'HH:MM'}].
-    Возвращает список словарей с полями:
-        day, input_day, input_bedtime, shown_bedtime, level,
-        delta, fine_before, fine_after, capped
-    Сортирует по хронологии, сливает дубли, рассчитывает штраф.
-    """
-    parsed = []
-    for e in entries:
-        day, bedtime = e["day"], e["bedtime"]
-        anchor = evening_anchor(day, bedtime)
-        parsed.append((anchor, day, bedtime))
-
-    # Нормализация записей внутри одного календарного дня:
-    #  * В одну дату отход ко сну может быть только один — вечерние записи
-    #    (12:00-23:59) одного и того же дня не сосуществуют: оставляем
-    #    последнюю по времени отбоя.
-    #  * За один вечер допустимы ДВЕ записи: вечерняя (день D, 12:00-23:59)
-    #    и ночная (день D+1, 00:00-11:59). Они относятся к разным датам в БД
-    #    (разные сущности) и не перезаписывают друг друга.
-    #  * Ночных записей одного вечера может быть несколько (например, правка
-    #    «15.10 23:40 -> 15.10 01:19» при уже существующей соседней ночи);
-    #    в расчёте участвует самая поздняя — она и есть фактический отбой.
-    evenings = {}          # night_key -> {"lvl0": rec | None, "lvl1": [recs]}
-    order = {}             # night_key -> порядок первого появления
-    for idx, (anchor, day, bedtime) in enumerate(sorted(parsed,
-                                                       key=lambda x: (x[0], x[1], x[2]))):
-        key = night_key(anchor)
-        bucket = evenings.setdefault(key, {"lvl0": None, "lvl1": []})
-        order.setdefault(key, len(order))
-        if level_of(anchor) == 0:
-            bucket["lvl0"] = (anchor, day, bedtime)   # последняя побеждает
-        else:
-            bucket["lvl1"].append((anchor, day, bedtime))
-
-    def _sorted_keys(keys):
-        return sorted(keys, key=lambda k: (k, order[k]))
-
-    result = []
-    fine = 0
-    last_evening = None
-    burn_today = 0
-
-    for key in _sorted_keys(evenings.keys()):
-        bucket = evenings[key]
-        records = []
-        if bucket["lvl0"] is not None:
-            records.append(bucket["lvl0"])
-        if bucket["lvl1"]:
-            records.append(bucket["lvl1"][-1])       # самая поздняя ночь
-
-        for anchor, day, bedtime in sorted(records, key=lambda x: x[0]):
-            lvl = level_of(anchor)
-            minutes_of_day = anchor % 1440
-
-            if key != last_evening:
-                last_evening = key
-                burn_today = 0
-
-            # Для ночной записи (00:00-11:59) время считается продолжением
-            # предыдущего вечера: минуты от полуночи + 1440.
-            effective_minutes = minutes_of_day + (1440 if lvl == 1 else 0)
-            delta = effective_minutes - IDEAL_MINUTES
-            fine_before = fine
-
-            capped = False
-            if delta > 0:
-                fine += delta
-            elif delta < 0:
-                burn = min(-delta, MAX_BURN_PER_DAY - burn_today, fine)
-                burn = max(burn, 0)
-                if -delta > MAX_BURN_PER_DAY or (-delta > burn and fine_before > 0):
-                    capped = True
-                burn_today += burn
-                fine -= burn
-
-            result.append({
-                "day": day,
-                "input_day": day,
-                "input_bedtime": bedtime,
-                "shown_bedtime": bedtime,
-                "level": lvl,
-                "delta": delta,
-                "fine_before": fine_before,
-                "fine_after": fine,
-                "capped": capped,
-            })
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Данные для графика (Chart.js)
 # ---------------------------------------------------------------------------
 
@@ -258,8 +104,8 @@ def build_chart_data(state):
     chart_data = []
     for idx, r in enumerate(state):
         if r["level"] == 1:
-            disp_day, _, _ = effective_evening(r["input_day"],
-                                               r["input_bedtime"])
+            disp_day, _, _ = core.effective_evening(
+                r["input_day"], r["input_bedtime"])
         else:
             disp_day = r["input_day"]
         d = datetime.strptime(disp_day, "%Y-%m-%d")
@@ -337,389 +183,6 @@ def _bedtime_to_minutes(bedtime):
     return int(hh) * 60 + int(mm)
 
 
-# ---------------------------------------------------------------------------
-# HTML-шаблон
-# ---------------------------------------------------------------------------
-
-PAGE = """<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Учёт сна</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-    background: #10151f; margin: 0; padding: 24px 16px; color: #e6eaf2;
-  }
-  .wrap { max-width: 860px; margin: 0 auto; }
-  h1 { margin: 0 0 4px; font-size: 26px; }
-  .subtitle { color: #8b94a7; margin: 0 0 20px; font-size: 14px; }
-  .cards { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
-  .card {
-    background: #1a2130; border-radius: 12px; padding: 14px 18px;
-    box-shadow: 0 1px 3px rgba(0,0,0,.4); flex: 1 1 180px;
-  }
-  .card .label { font-size: 12px; color: #8b94a7; text-transform: uppercase;
-                 letter-spacing: .04em; }
-  .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .green  { color: #3ecf7a; }
-  .yellow { color: #e8c341; }
-  .red    { color: #f06a6a; }
-  .panel { background: #1a2130; border-radius: 12px; padding: 18px;
-           box-shadow: 0 1px 3px rgba(0,0,0,.4); margin-bottom: 20px; }
-  .chart-panel { min-height: 400px; }
-  .chart-box { position: relative; height: 360px; }
-  .period-selector { display: flex; gap: 8px; flex-wrap: wrap;
-                     margin-bottom: 14px; }
-  .period-selector button {
-    background: #2a3550; color: #8b94a7; border: none; border-radius: 8px;
-    padding: 7px 14px; font-size: 13px; cursor: pointer; min-width: 0;
-  }
-  .period-selector button:hover { background: #3a4560; }
-  .period-selector button.active { background: #2f6fed; color: #fff; }
-  #sleepChart { width: 100% !important; }
-  form.inline-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
-  label.field { font-size: 13px; color: #8b94a7; display: flex;
-                flex-direction: column; gap: 4px; }
-  input[type=date], input[type=time] {
-    padding: 8px 10px; border: 1px solid #3a4356; border-radius: 8px;
-    font-size: 14px; background: #232b3d; color: #e6eaf2;
-  }
-  button, .btn {
-    background: #2f6fed; color: #fff; border: none; border-radius: 8px;
-    padding: 9px 16px; font-size: 14px; cursor: pointer; min-width: 60px;
-  }
-  button:hover, .btn:hover { background: #4b82f5; }
-  .table-scroll { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px;
-          min-width: 640px; }
-  th { text-align: left; color: #8b94a7; font-size: 12px;
-       text-transform: uppercase; letter-spacing: .04em;
-       padding: 8px 10px; border-bottom: 2px solid #333d52; }
-  td { padding: 9px 10px; border-bottom: 1px solid #262f42; vertical-align: middle; }
-  tr:nth-child(even) td { background: #1d2536; }
-  .mono { font-family: "SF Mono", Consolas, "Courier New", monospace; }
-  .badge-night {
-    background: #2b3560; color: #aab8ff; border-radius: 999px;
-    font-size: 11px; padding: 2px 8px; margin-left: 6px; white-space: nowrap;
-  }
-  .delta-pos { color: #f06a6a; }
-  .delta-neg { color: #3ecf7a; }
-  form.edit { display: inline-flex; gap: 6px; align-items: center; }
-  form.edit input[type=time] { width: 96px; padding: 5px 6px; }
-  form.edit button { padding: 5px 10px; min-width: 60px; }
-  form.del { display: inline; }
-  form.del button { background: #c94040; padding: 5px 12px; min-width: 60px; }
-  form.del button:hover { background: #e05555; }
-  .empty { color: #8b94a7; font-style: italic; padding: 12px 0; }
-  a.more { color: #6f9bff; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>🌙 Учёт сна</h1>
-  <p class="subtitle">Отбой вовремя — штраф меньше. Идеальное время: 23:00. Версия {{ version }}</p>
-
-  <div class="cards">
-    <div class="card">
-      <div class="label">Текущий штраф</div>
-      <div class="value {{ fine_class }}">{{ current_fine }} мин</div>
-    </div>
-    <div class="card">
-      <div class="label">Записей</div>
-      <div class="value">{{ total_count }}</div>
-    </div>
-    <div class="card">
-      <div class="label">Последний отбой</div>
-      <div class="value mono">{{ last_bedtime or "—" }}</div>
-    </div>
-    <div class="card">
-      <div class="label">Текущий стрик</div>
-      <div class="value {{ 'green' if current_streak > 0 else '' }}">
-        {{ current_streak }} {{ streak_word }}
-      </div>
-    </div>
-    <div class="card">
-      <div class="label" id="avgBedtimeLabel">Средний отбой</div>
-      <div class="value mono" id="avgBedtimeValue">{{ avg_bedtime or "—" }}</div>
-    </div>
-  </div>
-
-  <div class="panel chart-panel">
-    {% if chart_data_json %}
-    <div class="period-selector">
-      <button data-period="week">Неделя</button>
-      <button data-period="2weeks">2 недели</button>
-      <button data-period="month">Месяц</button>
-      <button data-period="3months">3 месяца</button>
-      <button data-period="6months">Полгода</button>
-      <button data-period="year">Год</button>
-      <button data-period="calendar_year" class="active">Календарный год</button>
-    </div>
-    <div class="chart-box">
-      <canvas id="sleepChart"></canvas>
-    </div>
-    {% else %}
-      <div class="empty">Добавьте первую запись, чтобы увидеть график.</div>
-    {% endif %}
-  </div>
-
-  <div class="panel">
-    <form class="inline-form" method="post" action="/save">
-      <label class="field">Дата
-        <input type="date" name="day" value="{{ today }}" required>
-      </label>
-      <label class="field">Отбой
-        <input type="time" name="bedtime" value="23:00" required>
-      </label>
-      <button type="submit">Сохранить</button>
-    </form>
-  </div>
-
-  <div class="panel">
-    <div class="table-scroll">
-    <table>
-      <thead>
-        <tr>
-          <th>Дата</th>
-          <th>Отбой</th>
-          <th>Изменение</th>
-          <th>Штраф после вечера</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in rows %}
-        <tr>
-          <td>{{ r.day_human }}{% if r.level == 1 %} <span class="badge-night">ночь</span>{% endif %}</td>
-          <td>
-            <form class="edit" method="post" action="/save">
-              <input type="hidden" name="old_day" value="{{ r.input_day }}">
-              <input type="hidden" name="old_bedtime" value="{{ r.input_bedtime }}">
-              <input type="hidden" name="day" value="{{ r.input_day }}">
-              <input type="time" name="bedtime" value="{{ r.input_bedtime }}">
-              <button type="submit">OK</button>
-            </form>
-          </td>
-          <td class="{{ r.delta_class }}">{{ r.delta_text }}</td>
-          <td class="mono {{ r.fine_class_row }}">{{ r.fine_after }}</td>
-          <td>
-            <form class="del" method="post" action="/delete">
-              <input type="hidden" name="day" value="{{ r.input_day }}">
-              <input type="hidden" name="bedtime" value="{{ r.input_bedtime }}">
-              <button type="submit">Удалить</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% if not show_all and rows|length < total_count %}
-    <div style="text-align:center; margin-top:16px;">
-      <a class="more" href="?show_all=1" style="text-decoration:none;">
-        Показать еще ({{ total_count - rows|length }} записей)
-      </a>
-    </div>
-    {% endif %}
-  </div>
-</div>
-{% if chart_data_json %}
-<script>
-  const chartData = {{ chart_data_json | safe }};
-
-  // --- Фильтрация данных по выбранному периоду -------------------------
-  // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
-  // остаётся короткая метка "DD.MM".
-  function toDate(s) { return new Date(s + 'T00:00:00'); }
-
-  const PERIOD_DAYS = { week: 7, '2weeks': 14, month: 30, '3months': 90,
-                        '6months': 180, year: 365 };
-  const PERIOD_LABELS = { week: 'за неделю', '2weeks': 'за 2 недели',
-                          month: 'за месяц', '3months': 'за 3 месяца',
-                          '6months': 'за полгода', year: 'за год',
-                          calendar_year: 'за календарный год' };
-
-  function filterByPeriod(period) {
-    if (!chartData || !chartData.length) return [];
-    const dates = chartData.map(d => toDate(d.full_date));
-    const last = dates.reduce((a, b) => a > b ? a : b);
-    let from, to;
-    if (period === 'calendar_year') {
-      const y = last.getFullYear();
-      from = new Date(y, 0, 1);             // 1 января года последней записи
-      to = new Date(y + 1, 0, 1);           // exclusive-граница: 1 января сл. г.
-      const out = chartData.filter((d, i) => dates[i] >= from && dates[i] < to);
-      // Если в этом календарном году ещё нет записей (например, история
-      // началась в декабре) — показываем всю историю вместо одной точки,
-      // иначе график вырождается в одиночную точку без линии.
-      return out.length ? out : chartData.slice();
-    }
-    const days = PERIOD_DAYS[period] || 365;
-    from = new Date(last);
-    from.setDate(from.getDate() - days + 1);
-    to = last;
-    const out = chartData.filter((d, i) => dates[i] >= from && dates[i] <= to);
-    return out.length ? out : chartData.slice(); // не показывать пустой график
-  }
-
-  // --- Динамический средний отбой (следует за выбранным периодом) -------
-  // bedtime_min — минуты по шкале вечера (23:00 = 1380, как в compute_state;
-  // послеполуночный отбой даёт > 1440). Если среднее перенесено за полночь,
-  // выводим его как время следующего дня ("25:30" -> "01:30").
-  function computeAverageBedtime(periodData) {
-    if (!periodData || !periodData.length) return null;
-    const sum = periodData.reduce((acc, d) => acc + d.bedtime_min, 0);
-    let avg = Math.round(sum / periodData.length);
-    if (avg >= 1440) avg -= 1440;   // перенос через полночь -> следующий день
-    return String(Math.floor(avg / 60)).padStart(2, '0') + ':' +
-           String(avg % 60).padStart(2, '0');
-  }
-
-  function updateStatsCard(periodData, period) {
-    const el = document.getElementById('avgBedtimeValue');
-    const lb = document.getElementById('avgBedtimeLabel');
-    if (lb) lb.textContent = 'Средний отбой (' +
-        (PERIOD_LABELS[period] || period) + ')';
-    if (el) el.textContent = computeAverageBedtime(periodData) || '—';
-  }
-
-  const gradientColors = v => {          // зелёный (0) -> красный (большие)
-    if (v <= 0)   return '#3ecf7a';
-    if (v <= 100) return '#8ed173';
-    if (v <= 200) return '#e8c341';
-    if (v <= 300) return '#ef9a5f';
-    return '#f06a6a';
-  };
-
-  // --- Динамическая ось Y: масштаб по отфильтрованному периоду -----------
-  // Отступы считаются как 10% ОТ ДИАПАЗОНА данных (range), а не от
-  // абсолютных значений min/max: иначе при высоко расположенных данных
-  // (например, 2700-2800) ось растягивалась до ~2560-3220 и линия
-  // занимала лишь верхнюю треть графика.
-  //   range  = maxFine - minFine
-  //   pad    = range * 0.10
-  //   yMax   = maxFine + pad ; yMin = max(0, minFine - pad)
-  // Краевые случаи: пустая выборка или нулевой максимум -> {0, 100};
-  // одна точка (range = 0) -> отступ 50 минут вокруг значения.
-  function computeYBounds(periodData) {
-    if (!periodData || !periodData.length) return { min: 0, max: 100 };
-    let maxFine = 0, minFine = Infinity;
-    for (const d of periodData) {
-      const f = d.fine || 0;
-      if (f > maxFine) maxFine = f;
-      if (f < minFine) minFine = f;
-    }
-    if (maxFine === 0) return { min: 0, max: 100 };
-    const range = maxFine - minFine;
-    const pad = range > 0 ? range * 0.10 : 50;
-    const max = Math.ceil((maxFine + pad) / 10) * 10;
-    const min = Math.max(0, Math.floor((minFine - pad) / 10) * 10);
-    return { min: min, max: max };
-  }
-
-  function applyPeriodToChart(target, periodData) {
-    const b = computeYBounds(periodData);
-    target.data.labels = periodData.map(d => d.date);
-    target.data.datasets[0].data = periodData.map(d => d.fine);
-    // ВАЖНО: в Chart.js v4 chart.options — геттер к config.options;
-    // пишем только СВОЙСТВА в существующий объект (min/max), а сам
-    // options не переприсваиваем.
-    try {
-      if (!target.options || !target.options.scales || !target.options.scales.y) {
-        throw new Error('нет options.scales.y');
-      }
-      target.options.scales.y.min = b.min;
-      target.options.scales.y.max = b.max;
-    } catch (err) {
-      console.error('Не удалось обновить ось Y напрямую:', err);
-    }
-  }
-
-  // --- Инициализация графика (с защитой: страница не должна ломаться) ---
-  let chart = null;
-  try {
-    if (typeof Chart === 'undefined') {
-      throw new Error('Chart.js не загружен (нет доступа к CDN)');
-    }
-    const initial = filterByPeriod('calendar_year');
-    chart = new Chart(document.getElementById('sleepChart'), {
-      type: 'line',
-      data: {
-        labels: initial.map(d => d.date),
-        datasets: [{
-          label: 'Штраф, мин',
-          data: initial.map(d => d.fine),
-          tension: 0.3,               // плавная (сглаженная) линия
-          pointRadius: 0,             // без точек на холсте
-          pointHitRadius: 10,         // но наведение работает
-          borderWidth: 2,
-          fill: false,
-          segment: {                  // цвет каждого сегмента по значению штрафа
-            borderColor: ctx => gradientColors(
-              Math.max(ctx.p0.parsed.y, ctx.p1.parsed.y))
-          }
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,   // занимать всю высоту .chart-box
-        interaction: { mode: 'index', intersect: false },
-        plugins: {
-          legend: { display: false },
-          tooltip: {                 // стандартные тултипы: дата + значение
-            backgroundColor: '#232b3d',
-            titleColor: '#e6eaf2',
-            bodyColor: '#e6eaf2',
-            borderColor: '#3a4356',
-            borderWidth: 1,
-            callbacks: {
-              label: ctx => ' Штраф: ' + ctx.parsed.y + ' мин'
-            }
-          }
-        },
-        scales: {
-          x: {
-            grid: { color: '#3a4356' },
-            ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
-          },
-          y: {
-            ...computeYBounds(initial),   // динамический масштаб по периоду
-            grid: { color: '#3a4356' },
-            ticks: { color: '#8b94a7' }
-          }
-        }
-      }
-    });
-    updateStatsCard(initial, 'calendar_year'); // базовое значение = активный период
-  } catch (err) {
-    console.error('Ошибка инициализации графика:', err);
-  }
-
-  // --- Переключение периода ------------------------------------------------
-  document.querySelectorAll('.period-selector button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.period-selector button')
-              .forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const period = btn.dataset.period;
-      const filtered = filterByPeriod(period);
-      if (chart) {
-        applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
-        chart.update();                        // перерисовка с новой осью Y
-      }
-      updateStatsCard(filtered, btn.dataset.period);
-    });
-  });
-</script>
-{% endif %}
-</body>
-</html>
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +200,7 @@ def index():
         conn.close()
 
     entries = [{"day": r["day"], "bedtime": r["bedtime"]} for r in db_rows]
-    state = compute_state(entries)
+    state = core.compute_state(entries)
     total_count = len(state)
     # История показывается от последней даты к более ранним.
     view = (state if show_all else state[-10:])[::-1]
@@ -747,11 +210,11 @@ def index():
         # Ночная запись (отбой 00:00-11:59) относится к вечеру ПРЕДЫДУЩЕГО
         # дня: в истории она показывается под своей эффективной датой вечера.
         if r["level"] == 1:
-            disp_day, _, _ = effective_evening(r["input_day"], r["input_bedtime"])
+            disp_day, _, _ = core.effective_evening(r["input_day"], r["input_bedtime"])
         else:
             disp_day = r["input_day"]
         d = datetime.strptime(disp_day, "%Y-%m-%d")
-        day_human = d.strftime("%d.%m.%Y") + " (" + DAY_MAP[d.strftime("%a")] + ")"
+        day_human = d.strftime("%d.%m.%Y") + " (" + core.DAY_MAP[d.strftime("%a")] + ")"
         delta = r["delta"]
         if delta > 0:
             delta_text, delta_class = "+%d" % delta, "delta-pos"
@@ -791,8 +254,8 @@ def index():
     else:
         streak_word = "дней"
 
-    from jinja2 import Template
-    html = Template(PAGE).render(
+    html = render_template(
+        'index.html',
         rows=rows,
         chart_data_json=chart_data_json,
         current_fine=current_fine,
@@ -816,7 +279,7 @@ def save():
     old_day = (request.form.get("old_day") or "").strip()
     old_bedtime = (request.form.get("old_bedtime") or "").strip()
     try:
-        evening_anchor(day, bedtime)  # валидация формата
+        core.evening_anchor(day, bedtime)  # валидация формата
     except ValueError:
         return redirect("/")
 
@@ -825,8 +288,8 @@ def save():
         # Одна дата — один отбой: не допускаем двух ВЕЧЕРНИХ записей
         # (12:00-23:59) одной календарной даты. Ночная запись этой же даты —
         # это продолжение ДРУГОГО (предыдущего) вечера, её не трогаем.
-        new_anchor = evening_anchor(day, bedtime)
-        new_lvl = level_of(new_anchor)
+        new_anchor = core.evening_anchor(day, bedtime)
+        new_lvl = core.level_of(new_anchor)
 
         def _ghost(nk_val):
             return conn.execute(
@@ -840,17 +303,17 @@ def save():
         # «15.10 23:40 -> 15.10 01:19» на уже удалённый ночной слот того же
         # вечера блокируется так же, как обычное сохранение.
         # Вечерние записи при этом не ограничиваются.
-        if new_lvl == 1 and _ghost(night_key(new_anchor)):
+        if new_lvl == 1 and _ghost(core.night_key(new_anchor)):
             conn.commit()
             return redirect("/")
 
         if old_day and old_bedtime:
             # Инлайн-правка существующей записи.
             try:
-                old_anchor = evening_anchor(old_day, old_bedtime)
+                old_anchor = core.evening_anchor(old_day, old_bedtime)
             except ValueError:
                 old_anchor = None
-            old_lvl = level_of(old_anchor) if old_anchor is not None else None
+            old_lvl = core.level_of(old_anchor) if old_anchor is not None else None
 
             # Правка МЕНЯЕТ ЯРУС (например «15.10 23:40 -> 15.10 01:19»).
             # Утверждённая логика (вариант A): это обычная правка времени,
@@ -880,14 +343,14 @@ def save():
                     conn.execute(
                         "INSERT OR REPLACE INTO deleted_nights (evening_day) "
                         "VALUES (?)",
-                        (night_key(old_anchor),))
+                        (core.night_key(old_anchor),))
 
         clash = conn.execute(
             "SELECT bedtime FROM sleep_entries WHERE day=?", (day,)).fetchall()
         for row in clash:
             other = row["bedtime"]
             if (other == bedtime or
-                    level_of(evening_anchor(day, other)) == new_lvl):
+                    core.level_of(core.evening_anchor(day, other)) == new_lvl):
                 conn.execute(
                     "DELETE FROM sleep_entries WHERE day=? AND bedtime=?",
                     (day, other))
@@ -900,7 +363,7 @@ def save():
         if new_lvl == 1:
             conn.execute(
                 "DELETE FROM deleted_nights WHERE evening_day=?",
-                (str(night_key(evening_anchor(day, bedtime))),))
+                (str(core.night_key(core.evening_anchor(day, bedtime))),))
         conn.commit()
     finally:
         conn.close()
@@ -914,12 +377,12 @@ def delete():
     conn = get_db()
     try:
         try:
-            anchor = evening_anchor(day, bedtime)
-            if level_of(anchor) == 1:
+            anchor = core.evening_anchor(day, bedtime)
+            if core.level_of(anchor) == 1:
                 conn.execute(
                     "INSERT OR REPLACE INTO deleted_nights (evening_day) "
                     "VALUES (?)",
-                    (night_key(anchor),))
+                    (core.night_key(anchor),))
         except ValueError:
             pass
         conn.execute(

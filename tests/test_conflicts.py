@@ -67,7 +67,7 @@ def test_edit_evening_to_night_replaces_same_evening_night(app_client, empty_db)
     deleted = {r[0] for r in conn.execute(
         "SELECT evening_day FROM deleted_nights")}
     conn.close()
-    from app import evening_anchor, night_key
+    from core import evening_anchor, night_key
     assert night_key(evening_anchor("2026-10-15", "01:19")) not in deleted
 
 

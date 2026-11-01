@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Регрессионные тесты расчёта якорей (evening_anchor / level_of / night_key)."""
 
-from app import effective_evening, evening_anchor, level_of, night_key
+from core import effective_evening, evening_anchor, level_of, night_key
 
 
 def test_evening_anchor_day():
