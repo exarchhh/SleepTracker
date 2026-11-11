@@ -46,7 +46,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.7.1"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.7.2"           # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
 
