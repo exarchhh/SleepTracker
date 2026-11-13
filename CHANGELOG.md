@@ -2,6 +2,29 @@
 
 Все значимые изменения проекта SleepTracker.
 
+## [0.8.0] - 2026-11-12
+
+### Добавлено
+- Проверка `Host` / `Origin` / `Sec-Fetch-Site` на POST `/save` и `/delete` (+ `tests/test_guard.py`): 403 на посторонний Host (DNS-rebinding), чужой Origin (CSRF) и cross-site-запросы; отсутствие заголовков (curl, тест-клиент) разрешено — закрывает CSRF и DNS-rebinding
+- Flash-сообщения об ошибках ввода: невалидный формат даты/времени показывает красную плашку над формой вместо молчаливого редиректа (`app.secret_key` для сессий flash)
+- Отклонение дат из будущего в `/save` (+тесты): flash «Нельзя добавлять записи с датой в будущем», запись не сохраняется; сегодняшний день разрешён
+- Локальный Chart.js 4.4.1 (`static/js/chart.umd.min.js`) — график работает офлайн, без CDN (+ `DECISIONS.md` запись 13)
+- `constraints.txt` — зафиксированные версии всего дерева зависимостей (19 пакетов: runtime + dev + build; срез владельца с целевого Python 3.8.6), README описывает установку с `-c constraints.txt`
+- Подтверждение удаления записи в UI: `confirm('Удалить запись?')` на кнопке «Удалить»
+- `tests/test_stats.py` — единый формат среднего отбоя (перенос через полночь); `tests/test_input_validation.py` — flash, даты будущего, рендер `| tojson`
+
+### Изменено
+- `build_exe.bat`: убраны `--hidden-import matplotlib` и `--collect-submodules matplotlib` (matplotlib удалён в v0.6.0); добавлены `--add-data "templates;templates"`, `--add-data "static;static"` и `--hidden-import core`
+- Средний отбой в едином формате «ЧЧ:ММ»: `avg %= 1440` — Python больше не показывает «25:30», сразу «01:30», как JS (логика расчёта штрафа не затронута)
+- `README.md`: установка с `-c constraints.txt` (runtime и dev), Chart.js — локальная копия, структура дополнена `static/js/chart.umd.min.js` и `constraints.txt`, перечень тестов дополнен, описание защиты POST-роутов
+- `BACKLOG.md`: убрано захардкоженное число тестов в Этапе 2, заголовок Этапа 3 — «Дневник сна и Экспорт», в «Техническое обслуживание» добавлен генератор фиктивных данных; `DECISIONS.md` дополнен записями 12–14
+
+### Удалено
+- CDN-зависимость Chart.js (шаблон подключает локальный файл через `url_for('static', ...)`)
+- Неиспользуемая фикстура `real_history` из `tests/conftest.py`
+- Мёртвые правила `.gitignore` (`*.db.bak*`, `*.bundle`, `server.log`, `server.info`, `*_fallback.log`); добавлено `.pytest_cache/`
+- `json.dumps` + `| safe` в рендере графика — заменено на передачу списка в шаблон и `{{ chart_data | tojson }}` (безопасное экранирование Jinja)
+
 ## [0.7.3] - 2026-11-11
 
 ### Изменено

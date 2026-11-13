@@ -2,7 +2,7 @@
 
 Локальное веб-приложение для учёта времени отбоя и расчёта «штрафа» за опоздания ко сну.
 
-**Текущая версия: 0.7.3** (схема `MAJ.MIN.PATCH`; синхронно с `VERSION` в `app.py`).
+**Текущая версия: 0.8.0** (схема `MAJ.MIN.PATCH`; синхронно с `VERSION` в `app.py`).
 
 ## Идея
 
@@ -16,10 +16,10 @@
 ## Технологии
 
 - Python 3.8.6+ (гарантированная совместимость с Windows 7)
-- Flask 3.0.3 — единственная точно зафиксированная зависимость; фиксация
-  транзитивных зависимостей через `constraints.txt` запланирована (см. `BACKLOG.md`)
+- Flask 3.0.3; всё дерево зависимостей зафиксировано в `constraints.txt`
 - SQLite (файл `sleep.db` в каталоге приложения)
-- Chart.js v4.4.1 (CDN, интерактивный график с тултипами и динамической осью Y)
+- Chart.js v4.4.1 (локальная копия в `static/js/`, интерактивный график с
+  тултипами и динамической осью Y; работает офлайн)
 - pytest 8.x (регрессионное тестирование)
 
 ## Структура проекта
@@ -29,11 +29,13 @@
 | `app.py` | Сервер Flask, роуты, работа с БД (ядро логики вынесено в `core.py`) |
 | `core.py` | Ядро бизнес-логики: `compute_state`, `evening_anchor`, `level_of`, `night_key`, `effective_evening` |
 | `templates/index.html` | HTML/CSS/JS шаблон главной страницы (Chart.js, селектор периодов, карточки статистики) |
+| `static/js/chart.umd.min.js` | Chart.js 4.4.1, локальная копия (график работает офлайн) |
 | `launcher.py` | Точка входа для PyInstaller: запуск сервера |
 | `run.bat` / `run.sh` | Скрипты автозапуска (Windows / Linux-macOS) |
 | `build_exe.bat` | Сборка `.exe` через PyInstaller |
 | `requirements.txt` | Зависимости runtime |
 | `requirements-dev.txt` | Зависимости для разработки (pytest) |
+| `constraints.txt` | Фиксация версий всего дерева зависимостей (генерирует владелец на целевой машине) |
 | `tests/` | Постоянный набор регрессионных тестов (pytest) |
 | `BACKLOG.md` | План развития проекта |
 | `AGENTS.md` | Правила работы AI-агента (контракт для любого AI-кодера) |
@@ -44,11 +46,13 @@
 
 Регрессионная защита проекта — постоянный набор тестов в папке `tests/`:
 `test_compute_state.py` (логика штрафа), `test_evening_anchor.py` (якоря,
-ярусы, ключ вечера), `test_conflicts.py` (конфликты слотов и правки).
+ярусы, ключ вечера), `test_conflicts.py` (конфликты слотов и правки),
+`test_guard.py` (защита POST-роутов), `test_stats.py` (статистика:
+средний отбой), `test_input_validation.py` (валидация ввода, flash).
 
 Запуск:
 
-    pip install pytest
+    python -m pip install -r requirements-dev.txt -c constraints.txt
     python -m pytest tests/ -v
 
 Правила: тесты версионируются вместе с кодом; перед каждым коммитом обязателен
@@ -57,8 +61,11 @@
 
 ## Запуск
 
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt -c constraints.txt
     python app.py            # или launcher.py, или run.bat / run.sh
+
+Ключ `-c constraints.txt` фиксирует версии всего дерева зависимостей для
+одинаковых окружений (файл генерирует владелец на целевой машине).
 
 Откройте http://127.0.0.1:5000
 
@@ -71,6 +78,9 @@
 - `POST /save` — сохранение/обновление записи (в т.ч. inline-правка времени в таблице)
 - `POST /delete` — удаление записи (ночные удаления запоминаются в `deleted_nights`)
 - `GET /healthz` — проверка работоспособности
+
+POST-роуты проверяют заголовки `Host` / `Origin` / `Sec-Fetch-Site` и
+отклоняют посторонние запросы с 403 (защита от CSRF и DNS-rebinding).
 
 ## База данных
 
@@ -106,7 +116,7 @@
 
     python -m venv venv
     venv\Scripts\activate
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt -c constraints.txt
 
 Запустите приложение: `python app.py` (или `run.bat`) и откройте
 http://127.0.0.1:5000. База `sleep.db` лежит в этой же папке.

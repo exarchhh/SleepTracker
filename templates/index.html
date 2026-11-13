@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -73,6 +73,11 @@
   form.del button { background: #c94040; padding: 5px 12px; min-width: 60px; }
   form.del button:hover { background: #e05555; }
   .empty { color: #8b94a7; font-style: italic; padding: 12px 0; }
+  .flash {
+    background: #2b1d26; border: 1px solid #f06a6a; color: #f06a6a;
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+    font-size: 14px;
+  }
   a.more { color: #6f9bff; }
 </style>
 </head>
@@ -117,7 +122,7 @@
   </div>
 
   <div class="panel chart-panel">
-    {% if chart_data_json %}
+    {% if chart_data %}
     <div class="period-selector">
       <button data-period="week">Неделя</button>
       <button data-period="2weeks">2 недели</button>
@@ -135,6 +140,14 @@
       <div class="empty">Добавьте первую запись, чтобы увидеть график.</div>
     {% endif %}
   </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    <div class="flash">
+      {% for m in messages %}<div>{{ m }}</div>{% endfor %}
+    </div>
+    {% endif %}
+  {% endwith %}
 
   <div class="panel">
     <form class="inline-form" method="post" action="/save">
@@ -179,7 +192,8 @@
             <form class="del" method="post" action="/delete">
               <input type="hidden" name="day" value="{{ r.input_day }}">
               <input type="hidden" name="bedtime" value="{{ r.input_bedtime }}">
-              <button type="submit">Удалить</button>
+              <button type="submit"
+                      onclick="return confirm('Удалить запись?')">Удалить</button>
             </form>
           </td>
         </tr>
@@ -196,9 +210,9 @@
     {% endif %}
   </div>
 </div>
-{% if chart_data_json %}
+{% if chart_data %}
 <script>
-  const chartData = {{ chart_data_json | safe }};
+  const chartData = {{ chart_data | tojson }};
 
   // --- Фильтрация данных по выбранному периоду -------------------------
   // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
@@ -369,7 +383,7 @@
   let chart = null;
   try {
     if (typeof Chart === 'undefined') {
-      throw new Error('Chart.js не загружен (нет доступа к CDN)');
+      throw new Error('Chart.js не загружен (нет static/js/chart.umd.min.js)');
     }
     const initial = filterByPeriod('all_time');
     chart = new Chart(document.getElementById('sleepChart'), {

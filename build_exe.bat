@@ -7,8 +7,9 @@ REM --onedir: exe и папка sleeptracker_files лежат в dist\, база
 REM создаётся РЯДОМ С EXE (не внутри временной папки), поэтому история
 REM переживает перезапуск и обновление программы.
 pyinstaller --onedir --name sleeptracker ^
-    --hidden-import matplotlib ^
-    --collect-submodules matplotlib ^
+    --add-data "templates;templates" ^
+    --add-data "static;static" ^
+    --hidden-import core ^
     launcher.py || goto :err
 
 echo.

@@ -4,14 +4,15 @@
 Основная логика расчёта штрафа вынесена в модуль `core` (см. core.compute_state).
 """
 
-import json
 import os
 import shutil
 import sqlite3
 import sys
 from datetime import date as _date, datetime, timedelta
+from urllib.parse import urlsplit
 
-from flask import Flask, redirect, render_template, request
+from flask import (Flask, abort, flash, redirect, render_template,
+                   request)
 
 import core
 
@@ -46,9 +47,10 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.7.3"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.8.0"           # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
+app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +177,7 @@ def compute_avg_bedtime_period(state, days=None):
     if not minutes:
         return None
     avg = round(sum(minutes) / len(minutes))
+    avg %= 1440  # перенос через полночь: "25:30" -> "01:30", как в JS
     return "%02d:%02d" % divmod(avg, 60)
 
 
@@ -183,6 +186,33 @@ def _bedtime_to_minutes(bedtime):
     return int(hh) * 60 + int(mm)
 
 
+
+
+# ---------------------------------------------------------------------------
+# Защита POST-роутов (CSRF / DNS-rebinding)
+# ---------------------------------------------------------------------------
+
+def _post_guard():
+    """Guard POST-роутов /save и /delete: Host / Origin / Sec-Fetch-Site.
+
+    Сервер слушает только 127.0.0.1: посторонний Host (DNS-rebinding),
+    Origin чужого сайта (CSRF) и cross-site-запросы отклоняются с 403.
+    Отсутствие Origin/Sec-Fetch-Site (curl, тест-клиент) разрешено —
+    в этом случае проверяется только Host.
+    """
+    allowed = ("localhost", "127.0.0.1")
+    host = urlsplit("//" + request.host).hostname
+    if host is None or host.lower() not in allowed:
+        abort(403)
+    origin = request.headers.get("Origin")
+    if origin:
+        parts = urlsplit(origin)
+        if (parts.scheme != "http" or parts.hostname is None
+                or parts.hostname.lower() not in allowed):
+            abort(403)
+    sec_fetch = request.headers.get("Sec-Fetch-Site")
+    if sec_fetch and sec_fetch.lower() not in ("same-origin", "none"):
+        abort(403)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +270,6 @@ def index():
         "yellow" if current_fine < 300 else "red")
 
     chart_data = build_chart_data(state)
-    chart_data_json = json.dumps(chart_data) if chart_data else ""
 
     current_streak = compute_streak(state)
     # Базовое значение карточки = активный период по умолчанию
@@ -257,7 +286,7 @@ def index():
     html = render_template(
         'index.html',
         rows=rows,
-        chart_data_json=chart_data_json,
+        chart_data=chart_data,
         current_fine=current_fine,
         fine_class=fine_class,
         last_bedtime=last_bedtime,
@@ -274,6 +303,7 @@ def index():
 
 @app.route("/save", methods=["POST"])
 def save():
+    _post_guard()
     day = (request.form.get("day") or "").strip()
     bedtime = (request.form.get("bedtime") or "").strip()
     old_day = (request.form.get("old_day") or "").strip()
@@ -281,6 +311,12 @@ def save():
     try:
         core.evening_anchor(day, bedtime)  # валидация формата
     except ValueError:
+        flash("Некорректная дата или время — запись не сохранена.")
+        return redirect("/")
+    # Записи «из будущего» отклоняются: опечатка в дате не должна портить
+    # статистику (сегодняшний день разрешён; old_day здесь не участвует).
+    if day > _date.today().isoformat():
+        flash("Нельзя добавлять записи с датой в будущем")
         return redirect("/")
 
     conn = get_db()
@@ -372,6 +408,7 @@ def save():
 
 @app.route("/delete", methods=["POST"])
 def delete():
+    _post_guard()
     day = (request.form.get("day") or "").strip()
     bedtime = (request.form.get("bedtime") or "").strip()
     conn = get_db()

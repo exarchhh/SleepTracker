@@ -58,12 +58,3 @@ def app_client(empty_db, monkeypatch):
     app_module.app.config["TESTING"] = True
     with app_module.app.test_client() as client:
         yield client
-
-
-@pytest.fixture
-def real_history():
-    """Фрагмент реальной истории пользователя: вечер 25.07 + ночь 26.07 00:19."""
-    return [
-        {"day": "2026-07-25", "bedtime": "22:41"},
-        {"day": "2026-07-26", "bedtime": "00:19"},
-    ]
