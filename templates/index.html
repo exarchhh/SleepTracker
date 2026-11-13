@@ -78,6 +78,17 @@
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
     font-size: 14px;
   }
+  /* Блок ghost-разблокировки (v0.10.0): нейтральный стиль — это
+     вспомогательное действие, а не ошибка (в отличие от .flash) */
+  .ghost-block { display: flex; flex-direction: column; gap: 8px;
+                 margin-bottom: 16px; }
+  .ghost-row {
+    display: flex; gap: 10px; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; background: #232b3d; border: 1px solid #3a4356;
+    border-radius: 8px; padding: 10px 14px; font-size: 14px; color: #c3cadb;
+  }
+  form.unlock { display: inline; }
+  form.unlock button { padding: 6px 12px; min-width: 0; font-size: 13px; }
   /* Диалог подтверждений (v0.9.0): палитра .panel/.flash, ::backdrop — затемнение */
   dialog#app-dialog {
     background: #1a2130; color: #e6eaf2; border: 1px solid #3a4356;
@@ -146,14 +157,14 @@
   <div class="panel chart-panel">
     {% if chart_data %}
     <div class="period-selector">
-      <button data-period="week">Неделя</button>
-      <button data-period="2weeks">2 недели</button>
-      <button data-period="month">Месяц</button>
-      <button data-period="3months">3 месяца</button>
-      <button data-period="6months">Полгода</button>
-      <button data-period="year">Год</button>
-      <button data-period="calendar_year">Календарный год</button>
-      <button data-period="all_time">За всё время</button>
+      <button data-period="week" aria-pressed="false">Неделя</button>
+      <button data-period="2weeks" aria-pressed="false">2 недели</button>
+      <button data-period="month" aria-pressed="false">Месяц</button>
+      <button data-period="3months" aria-pressed="false">3 месяца</button>
+      <button data-period="6months" aria-pressed="false">Полгода</button>
+      <button data-period="year" aria-pressed="false">Год</button>
+      <button data-period="calendar_year" aria-pressed="false">Календарный год</button>
+      <button data-period="all_time" aria-pressed="false">За всё время</button>
     </div>
     <div class="chart-box">
       <canvas id="sleepChart"></canvas>
@@ -170,6 +181,21 @@
     </div>
     {% endif %}
   {% endwith %}
+
+  {% if ghosted_nights %}
+  <div class="ghost-block">
+    {% for g in ghosted_nights %}
+    <div class="ghost-row">
+      <span>Ночная запись для вечера {{ g.human }} удалена — повторный ввод заблокирован</span>
+      <form class="unlock" method="post" action="/unlock_night"
+            data-evening="{{ g.human }}">
+        <input type="hidden" name="evening_day" value="{{ g.iso }}">
+        <button type="submit">Разрешить повторный ввод</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   <div class="panel">
     <form class="inline-form" method="post" action="/save">
@@ -289,6 +315,7 @@
       msgEl.textContent = o.message || '';
       okBtn.textContent = o.okText || 'Подтвердить';
       okBtn.classList.toggle('danger', !!o.danger);
+      cancelBtn.textContent = o.cancelText || 'Отмена';
       cancelBtn.hidden = !!o.okOnly;
       confirmed = false;
       dlg.showModal();
@@ -317,6 +344,22 @@
         }).then(function (ok) { if (ok) form.submit(); });
       });
     });
+
+    // Разблокировка ночного слота (v0.10.0): первое переиспользование каркаса
+    // showConfirm. Отмена/Esc/затемнение — ничего не происходит.
+    document.querySelectorAll('form.unlock').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        showConfirm({
+          title: 'Разблокировка ночного слота',
+          message: 'Разрешить повторный ввод ночной записи для вечера ' +
+                   form.dataset.evening +
+                   '? Защита от случайной перезаписи для этого вечера будет снята.',
+          okText: 'Разрешить',
+          danger: false
+        }).then(function (ok) { if (ok) form.submit(); });
+      });
+    });
   })();
 </script>
 {% if chart_data %}
@@ -335,6 +378,37 @@
                           '6months': 'за полгода', year: 'за год',
                           calendar_year: 'за календарный год',
                           all_time: 'за всё время' };
+
+  // --- Период: подсветка + сохранение в localStorage (v0.10.0) ------------
+  // Активная кнопка получает .active + aria-pressed="true" (a11y); выбор
+  // периода переживает перезагрузку страницы и правки записей. Storage
+  // может быть недоступен (приватный режим) — это не должно ломать страницу.
+  const PERIOD_STORAGE_KEY = 'sleepTrackerPeriod';
+
+  function isKnownPeriod(period) {
+    return period === 'all_time' || period === 'calendar_year' ||
+           !!PERIOD_DAYS[period];
+  }
+
+  function persistPeriod(period) {
+    try { localStorage.setItem(PERIOD_STORAGE_KEY, period); } catch (err) {}
+  }
+
+  function restorePeriod() {
+    try {
+      const saved = localStorage.getItem(PERIOD_STORAGE_KEY);
+      if (saved && isKnownPeriod(saved)) return saved;
+    } catch (err) {}
+    return 'all_time';   // период по умолчанию
+  }
+
+  function setActivePeriod(period) {
+    document.querySelectorAll('.period-selector button').forEach(function (b) {
+      const on = b.dataset.period === period;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
 
   function filterByPeriod(period) {
     if (!chartData || !chartData.length) return [];
@@ -494,7 +568,8 @@
     if (typeof Chart === 'undefined') {
       throw new Error('Chart.js не загружен (нет static/js/chart.umd.min.js)');
     }
-    const initial = filterByPeriod('all_time');
+    const activePeriod = restorePeriod();     // последний выбор пользователя
+    const initial = filterByPeriod(activePeriod);
     chart = new Chart(document.getElementById('sleepChart'), {
       type: 'line',
       data: {
@@ -543,7 +618,8 @@
         }
       }
     });
-    updateStatsCard(initial, 'all_time');     // базовое значение = активный период
+    setActivePeriod(activePeriod);            // подсветка + aria при загрузке
+    updateStatsCard(initial, activePeriod);   // базовое значение = активный период
     updateRecordCards(initial);               // карточки рекордов по активному периоду
   } catch (err) {
     console.error('Ошибка инициализации графика:', err);
@@ -552,16 +628,15 @@
   // --- Переключение периода ------------------------------------------------
   document.querySelectorAll('.period-selector button').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.period-selector button')
-              .forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
       const period = btn.dataset.period;
+      setActivePeriod(period);                // подсветка обновляется сразу
+      persistPeriod(period);                 // выбор переживает перезагрузку
       const filtered = filterByPeriod(period);
       if (chart) {
         applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
         chart.update();                        // перерисовка с новой осью Y
       }
-      updateStatsCard(filtered, btn.dataset.period);
+      updateStatsCard(filtered, period);
       updateRecordCards(filtered);
     });
   });

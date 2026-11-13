@@ -131,6 +131,80 @@ def test_ghost_night_save_flashes_reason(app_client, empty_db):
     assert _rows(empty_db) == set()
 
 
+def test_unlock_night_offered_after_delete(app_client, empty_db):
+    """После удаления ночной записи GET / предлагает разблокировку вечера.
+
+    Ночь 16.10 00:30 принадлежит вечеру 15.10: на странице появляется
+    «Разрешить повторный ввод» и дата вечера 15.10.2026.
+    """
+    app_client.post("/save", data={"day": "2026-10-16", "bedtime": "00:30"})
+    app_client.post("/delete", data={"day": "2026-10-16", "bedtime": "00:30"})
+    resp = app_client.get("/")
+    html = resp.get_data(as_text=True)
+    assert "Разрешить повторный ввод" in html
+    assert "15.10.2026" in html
+
+
+def test_unlock_night_allows_reentry(app_client, empty_db):
+    """Разблокировка снимает ghost-память: повторный ввод ночи сохраняется.
+
+    Удалённая ночь 16.10 00:30 (вечер 15.10) после POST /unlock_night с
+    evening_day=2026-10-15 сохраняется повторно, строка из deleted_nights
+    исчезает.
+    """
+    app_client.post("/save", data={"day": "2026-10-16", "bedtime": "00:30"})
+    app_client.post("/delete", data={"day": "2026-10-16", "bedtime": "00:30"})
+    conn = sqlite3.connect(empty_db)
+    before = conn.execute("SELECT COUNT(*) FROM deleted_nights").fetchone()[0]
+    conn.close()
+    assert before == 1
+
+    resp = app_client.post("/unlock_night",
+                           data={"evening_day": "2026-10-15"})
+    assert resp.status_code == 302
+
+    resp = app_client.post("/save",
+                           data={"day": "2026-10-16", "bedtime": "00:30"},
+                           follow_redirects=True)
+    assert resp.status_code == 200
+    assert ("Эта ночная запись была удалена ранее — сохранение отклонено"
+            not in resp.get_data(as_text=True))
+    assert _rows(empty_db) == {("2026-10-16", "00:30")}
+    conn = sqlite3.connect(empty_db)
+    after = conn.execute("SELECT COUNT(*) FROM deleted_nights").fetchone()[0]
+    conn.close()
+    assert after == 0
+
+
+def test_unlock_night_guarded(app_client, empty_db):
+    """POST /unlock_night под guard: чужой Origin -> 403."""
+    resp = app_client.post("/unlock_night",
+                           data={"evening_day": "2026-10-15"},
+                           headers={"Origin": "http://evil.com"})
+    assert resp.status_code == 403
+
+
+def test_unlock_night_idempotent(app_client, empty_db):
+    """Несуществующий evening_day: 302, состояние БД не меняется.
+
+    Память о РЕАЛЬНОМ удалённом вечере при этом не снимается (ключ вечера
+    не совпал) — идемпотентность и точечность операции.
+    """
+    app_client.post("/save", data={"day": "2026-10-16", "bedtime": "00:30"})
+    app_client.post("/delete", data={"day": "2026-10-16", "bedtime": "00:30"})
+
+    resp = app_client.post("/unlock_night", data={"evening_day": "2099-01-01"})
+    assert resp.status_code == 302
+
+    from core import evening_anchor, night_key
+    real_key = str(night_key(evening_anchor("2026-10-15", "12:00")))
+    conn = sqlite3.connect(empty_db)
+    ghosts = {r[0] for r in
+              conn.execute("SELECT evening_day FROM deleted_nights")}
+    conn.close()
+    assert ghosts == {real_key}
+
+
 def test_delete_removes_only_target_entry(app_client, empty_db):
     """Удаление одной записи не затрагивает другие (вечер/ночь одного дня)."""
     app_client.post("/save", data={"day": "2026-10-20", "bedtime": "23:40"})

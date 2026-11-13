@@ -47,7 +47,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.9.0"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.10.0"          # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода
@@ -226,6 +226,12 @@ def index():
     try:
         db_rows = conn.execute(
             "SELECT day, bedtime FROM sleep_entries").fetchall()
+        # Память об удалённых ночах (ghost-блокировка, v0.10.0): вечер
+        # хранится как ключ эпохи (night_key) — превращаем его обратно
+        # в дату вечера для блока «Разрешить повторный ввод».
+        ghost_rows = conn.execute(
+            "SELECT evening_day FROM deleted_nights ORDER BY evening_day"
+        ).fetchall()
     finally:
         conn.close()
 
@@ -283,6 +289,18 @@ def index():
     else:
         streak_word = "дней"
 
+    # Заблокированные вечера для UI-разблокировки: iso — дата вечера
+    # «YYYY-MM-DD» (параметр формы /unlock_night), human — «DD.MM.YYYY»
+    # тем же способом, каким выше форматируется day_human.
+    ghosted_nights = []
+    for r in ghost_rows:
+        g_date = _date.fromordinal(
+            int(r["evening_day"]) + _date(1970, 1, 1).toordinal())
+        ghosted_nights.append({
+            "iso": g_date.isoformat(),
+            "human": g_date.strftime("%d.%m.%Y"),
+        })
+
     html = render_template(
         'index.html',
         rows=rows,
@@ -297,6 +315,7 @@ def index():
         show_all=show_all,
         today=_date.today().isoformat(),
         version=VERSION,
+        ghosted_nights=ghosted_nights,
     )
     return html
 
@@ -429,6 +448,36 @@ def delete():
         conn.commit()
     finally:
         conn.close()
+    return redirect("/")
+
+
+@app.route("/unlock_night", methods=["POST"])
+def unlock_night():
+    """POST /unlock_night — явное снятие ghost-памяти вечера (v0.10.0).
+
+    Блокировка сохраняется по умолчанию; пользователь одной осознанной
+    кнопкой (с confirm-диалогом) разрешает повторный ввод ночной записи.
+    Параметр evening_day — строка даты вечера «YYYY-MM-DD»; снимается
+    память именно этого вечера (все три вектора блокировки в /save
+    лечатся одним DELETE). Идемпотентен: неизвестный вечер не меняет БД.
+    """
+    _post_guard()
+    evening_day = (request.form.get("evening_day") or "").strip()
+    try:
+        # 12:00 — начало вечера D: night_key такого anchor = ключ вечера D,
+        # совпадающий с ключом ночной записи 00:00-11:59 дня D+1.
+        anchor = core.evening_anchor(evening_day, "12:00")
+    except ValueError:
+        anchor = None
+    if anchor is not None:
+        conn = get_db()
+        try:
+            conn.execute(
+                "DELETE FROM deleted_nights WHERE evening_day=?",
+                (str(core.night_key(anchor)),))
+            conn.commit()
+        finally:
+            conn.close()
     return redirect("/")
 
 
