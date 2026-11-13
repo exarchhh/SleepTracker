@@ -67,3 +67,18 @@ def test_index_empty_db_has_no_chart_block(app_client, empty_db):
     html = resp.get_data(as_text=True)
     assert "chartData" not in html
     assert "Добавьте первую запись" in html
+
+
+def test_index_renders_app_dialog_carcase(app_client, empty_db):
+    """GET /: каркас диалога есть (и на пустой БД), системного confirm() нет.
+
+    Диалог — чистый JS/UI (автотестов поведения нет, визуальная проверка
+    владельцем), но разметка каркаса и отказ от системного confirm()
+    проверяются рендером.
+    """
+    resp = app_client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert '<dialog id="app-dialog"' in html
+    assert "return confirm(" not in html
+    assert "onclick=" not in html

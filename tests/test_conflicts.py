@@ -107,6 +107,30 @@ def test_ghost_night_blocks_slot(app_client, empty_db):
     assert ("2026-10-17", "23:05") in _rows(empty_db)
 
 
+def test_ghost_night_save_flashes_reason(app_client, empty_db):
+    """Ghost-сохранение показывает flash с объяснением (v0.9.0).
+
+    Создаём ночную запись → удаляем её (в deleted_nights появляется строка) →
+    повторный POST той же ночи: 302, при переходе по редиректу видна плашка
+    с текстом блокировки, записи в БД нет.
+    """
+    app_client.post("/save", data={"day": "2026-10-16", "bedtime": "00:30"})
+    app_client.post("/delete", data={"day": "2026-10-16", "bedtime": "00:30"})
+    conn = sqlite3.connect(empty_db)
+    ghosts = conn.execute(
+        "SELECT COUNT(*) FROM deleted_nights").fetchone()[0]
+    conn.close()
+    assert ghosts == 1
+
+    resp = app_client.post("/save",
+                           data={"day": "2026-10-16", "bedtime": "00:30"},
+                           follow_redirects=True)
+    assert resp.status_code == 200
+    assert ("Эта ночная запись была удалена ранее — сохранение отклонено"
+            in resp.get_data(as_text=True))
+    assert _rows(empty_db) == set()
+
+
 def test_delete_removes_only_target_entry(app_client, empty_db):
     """Удаление одной записи не затрагивает другие (вечер/ночь одного дня)."""
     app_client.post("/save", data={"day": "2026-10-20", "bedtime": "23:40"})

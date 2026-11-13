@@ -47,7 +47,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.8.0"           # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.9.0"           # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода
@@ -341,6 +341,7 @@ def save():
         # Вечерние записи при этом не ограничиваются.
         if new_lvl == 1 and _ghost(core.night_key(new_anchor)):
             conn.commit()
+            flash("Эта ночная запись была удалена ранее — сохранение отклонено")
             return redirect("/")
 
         if old_day and old_bedtime:

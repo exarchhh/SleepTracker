@@ -78,6 +78,28 @@
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
     font-size: 14px;
   }
+  /* Диалог подтверждений (v0.9.0): палитра .panel/.flash, ::backdrop — затемнение */
+  dialog#app-dialog {
+    background: #1a2130; color: #e6eaf2; border: 1px solid #3a4356;
+    border-radius: 12px; padding: 18px 20px;
+    max-width: 380px; width: calc(100% - 32px);
+    box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  dialog#app-dialog:not([open]) { display: none; }
+  dialog#app-dialog::backdrop { background: rgba(8, 11, 18, .72); }
+  dialog#app-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+  dialog#app-dialog p { margin: 0 0 16px; font-size: 14px;
+                        color: #c3cadb; line-height: 1.45; }
+  .app-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+  .app-dialog-actions button {
+    background: #2a3550; color: #e6eaf2; border: none; border-radius: 8px;
+    padding: 8px 14px; font-size: 14px; cursor: pointer; min-width: 0;
+  }
+  .app-dialog-actions button:hover { background: #3a4560; }
+  .app-dialog-actions button#appDialogOk { background: #2f6fed; color: #fff; }
+  .app-dialog-actions button#appDialogOk:hover { background: #4b82f5; }
+  .app-dialog-actions button#appDialogOk.danger { background: #c94040; }
+  .app-dialog-actions button#appDialogOk.danger:hover { background: #e05555; }
   a.more { color: #6f9bff; }
 </style>
 </head>
@@ -192,8 +214,7 @@
             <form class="del" method="post" action="/delete">
               <input type="hidden" name="day" value="{{ r.input_day }}">
               <input type="hidden" name="bedtime" value="{{ r.input_bedtime }}">
-              <button type="submit"
-                      onclick="return confirm('Удалить запись?')">Удалить</button>
+              <button type="submit">Удалить</button>
             </form>
           </td>
         </tr>
@@ -210,6 +231,94 @@
     {% endif %}
   </div>
 </div>
+
+<!-- Каркас диалогов (v0.9.0): подтверждения и уведомления в стиле приложения.
+     Единый хелпер для всех будущих фич (Этапы 2–3); системный confirm() не используется. -->
+<dialog id="app-dialog">
+  <h2 id="appDialogTitle"></h2>
+  <p id="appDialogMessage"></p>
+  <div class="app-dialog-actions">
+    <button type="button" id="appDialogCancel">Отмена</button>
+    <button type="button" id="appDialogOk">Подтвердить</button>
+  </div>
+</dialog>
+
+<script>
+  // --- showConfirm / showAlert: переиспользуемый каркас диалогов ----------
+  // Нативный <dialog> + showModal(): ноль зависимостей, a11y из коробки
+  // (focus trap, Esc), работает в браузерах Windows 7.
+  //   showConfirm({ title, message, okText = 'Подтвердить', danger = false })
+  //       -> Promise<boolean>  (true — только по кнопке подтверждения;
+  //          Esc / «Отмена» / клик по затемнению дают false)
+  //   showAlert({ title, message, okText = 'ОК' }) -> Promise<boolean>
+  //       (режим одной кнопки; будущие уведомления — только через него)
+  // Никаких новых системных confirm()/alert() в проекте.
+  (function () {
+    'use strict';
+    var dlg = document.getElementById('app-dialog');
+    var titleEl = document.getElementById('appDialogTitle');
+    var msgEl = document.getElementById('appDialogMessage');
+    var okBtn = document.getElementById('appDialogOk');
+    var cancelBtn = document.getElementById('appDialogCancel');
+    var confirmed = false;
+    var resolver = null;
+
+    dlg.addEventListener('close', function () {
+      var done = resolver;
+      resolver = null;
+      okBtn.classList.remove('danger');
+      if (done) done(confirmed);
+    });
+    dlg.addEventListener('click', function (e) {
+      // Клик по затемнению (::backdrop) — трактуем как отмену
+      if (e.target === dlg) { confirmed = false; dlg.close(); }
+    });
+
+    okBtn.addEventListener('click', function () {
+      confirmed = true;
+      dlg.close();
+    });
+    cancelBtn.addEventListener('click', function () {
+      confirmed = false;
+      dlg.close();
+    });
+
+    function showDialog(opts) {
+      var o = opts || {};
+      titleEl.textContent = o.title || 'SleepTracker';
+      msgEl.textContent = o.message || '';
+      okBtn.textContent = o.okText || 'Подтвердить';
+      okBtn.classList.toggle('danger', !!o.danger);
+      cancelBtn.hidden = !!o.okOnly;
+      confirmed = false;
+      dlg.showModal();
+      // Фокус на безопасном действии (a11y); Esc закрывает нативно.
+      (o.okOnly ? okBtn : cancelBtn).focus();
+      return new Promise(function (resolve) { resolver = resolve; });
+    }
+
+    window.showConfirm = function (opts) {
+      return showDialog(Object.assign({ danger: false }, opts));
+    };
+    window.showAlert = function (opts) {
+      return showDialog(Object.assign({ okOnly: true }, opts));
+    };
+
+    // Удаление записи: подтверждение в стиле приложения; при подтверждении —
+    // программная отправка формы.
+    document.querySelectorAll('form.del').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        showConfirm({
+          title: 'Удаление записи',
+          message: 'Удалить запись? Действие нельзя отменить.',
+          okText: 'Удалить',
+          danger: true
+        }).then(function (ok) { if (ok) form.submit(); });
+      });
+    });
+  })();
+</script>
 {% if chart_data %}
 <script>
   const chartData = {{ chart_data | tojson }};
