@@ -47,7 +47,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.10.0"          # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.11.0"          # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода
@@ -332,94 +332,91 @@ def save():
     except ValueError:
         flash("Некорректная дата или время — запись не сохранена.")
         return redirect("/")
-    # Записи «из будущего» отклоняются: опечатка в дате не должна портить
-    # статистику (сегодняшний день разрешён; old_day здесь не участвует).
+
+    # Правило 1 «правка не меняет вечер» (R1-plus, v0.11.0): инлайн-правка
+    # при НЕизменённой дате и смене яруса роллит дату, чтобы запись осталась
+    # в СВОЁМ вечере: 0->1 (вечер->ночь) — +1 день (правка 13.11 23:45 на
+    # 01:30 даёт запись 14.11 01:30 — ночной слот того же вечера 13.11),
+    # 1->0 (ночь->вечер) — -1 день. Явная смена даты (day != old_day)
+    # сохраняет перенос между вечерами без ролла.
+    if old_day and old_bedtime and day == old_day:
+        try:
+            old_anchor = core.evening_anchor(old_day, old_bedtime)
+        except ValueError:
+            old_anchor = None
+        if old_anchor is not None:
+            probe = core.evening_anchor(day, bedtime)
+            old_lvl = core.level_of(old_anchor)
+            probe_lvl = core.level_of(probe)
+            if old_lvl == 0 and probe_lvl == 1:
+                day = (datetime.strptime(old_day, "%Y-%m-%d").date()
+                       + timedelta(days=1)).isoformat()
+            elif old_lvl == 1 and probe_lvl == 0:
+                day = (datetime.strptime(old_day, "%Y-%m-%d").date()
+                       - timedelta(days=1)).isoformat()
+
+    # Записи «из будущего» отклоняются по ИТОГОВОЙ дате: опечатка в дате не
+    # должна портить статистику (сегодняшний день разрешён; ролл правки
+    # вечерней записи сегодняшнего вечера на ночное время до смены
+    # календарной даты даёт «завтра» и тоже отклоняется).
     if day > _date.today().isoformat():
         flash("Нельзя добавлять записи с датой в будущем")
         return redirect("/")
 
     conn = get_db()
     try:
-        # Одна дата — один отбой: не допускаем двух ВЕЧЕРНИХ записей
-        # (12:00-23:59) одной календарной даты. Ночная запись этой же даты —
-        # это продолжение ДРУГОГО (предыдущего) вечера, её не трогаем.
         new_anchor = core.evening_anchor(day, bedtime)
         new_lvl = core.level_of(new_anchor)
+        evening_key = core.night_key(new_anchor)  # вечер итоговой записи
 
         def _ghost(nk_val):
             return conn.execute(
                 "SELECT 1 FROM deleted_nights WHERE evening_day=?",
                 (str(nk_val),)).fetchone() is not None
 
-        # Память об удалённых ночах: если вечер новой НОЧНОЙ записи есть в
-        # deleted_nights, сохранение блокируется — «призрак» удалённой ночи
-        # не должен воскресать и перезаписывать правки соседнего вечера.
-        # Для инлайн-правки проверяется также вечер СТАРОЙ записи: правка
-        # «15.10 23:40 -> 15.10 01:19» на уже удалённый ночной слот того же
-        # вечера блокируется так же, как обычное сохранение.
-        # Вечерние записи при этом не ограничиваются.
-        if new_lvl == 1 and _ghost(core.night_key(new_anchor)):
+        # Память об удалённых ночах: если вечер итоговой НОЧНОЙ записи есть
+        # в deleted_nights, сохранение блокируется ДО любых мутаций —
+        # «призрак» удалённой ночи не воскресает, заблокированное сохранение
+        # не меняет БД (в т.ч. ролл-правка на ghost-вечер). Вечерние записи
+        # не ограничиваются.
+        if new_lvl == 1 and _ghost(evening_key):
             conn.commit()
             flash("Эта ночная запись была удалена ранее — сохранение отклонено")
             return redirect("/")
 
         if old_day and old_bedtime:
-            # Инлайн-правка существующей записи.
-            try:
-                old_anchor = core.evening_anchor(old_day, old_bedtime)
-            except ValueError:
-                old_anchor = None
-            old_lvl = core.level_of(old_anchor) if old_anchor is not None else None
-
-            # Правка МЕНЯЕТ ЯРУС (например «15.10 23:40 -> 15.10 01:19»).
-            # Утверждённая логика (вариант A): это обычная правка времени,
-            # перевалившего за полночь. Новая ночная запись относится к вечеру
-            # ПРЕДЫДУЩЕГО дня (вечер 14.10) и является обычной правкой этой
-            # ночной сущности: если на дате новой записи уже есть ночная
-            # запись того же вечера — она заменяется (UPDATE), а не
-            # блокируется. Память в deleted_nights при этом снимается,
-            # поскольку слот снова занят легальной записью.
-            if old_lvl == 0 and new_lvl == 1:
-                conn.execute(
-                    "DELETE FROM sleep_entries WHERE day=? AND bedtime<?",
-                    (day, "12:00"))
-
+            # Инлайн-правка: старая запись удаляется по исходным полям
+            # (old_day/old_bedtime не роллятся). Правка больше не опустошает
+            # старый вечер и ничего не помечает в deleted_nights.
             conn.execute(
                 "DELETE FROM sleep_entries WHERE day=? AND bedtime=?",
                 (old_day, old_bedtime))
-            # Помечаем вечер старой записи в deleted_nights, если она была
-            # единственной в своём вечере и её ярус меняется при правке
-            # (например «15.10 23:40 -> 15.10 01:19»). Это защищает от
-            # перезаписи ночной записи соседнего вечера.
-            if old_anchor is not None:
-                still_there = conn.execute(
-                    "SELECT 1 FROM sleep_entries WHERE day=? LIMIT 1",
-                    (old_day,)).fetchone()
-                if old_lvl != new_lvl and not still_there:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO deleted_nights (evening_day) "
-                        "VALUES (?)",
-                        (core.night_key(old_anchor),))
 
-        clash = conn.execute(
-            "SELECT bedtime FROM sleep_entries WHERE day=?", (day,)).fetchall()
-        for row in clash:
-            other = row["bedtime"]
-            if (other == bedtime or
-                    core.level_of(core.evening_anchor(day, other)) == new_lvl):
-                conn.execute(
-                    "DELETE FROM sleep_entries WHERE day=? AND bedtime=?",
-                    (day, other))
+        # Правило 2 — инвариант «один отбой на вечер» (R1-plus, v0.11.0):
+        # в каждом вечере ровно одна запись, новая заменяет прежнюю.
+        # Очищаются ОБА слота целевого вечера E = evening_key: вечерний
+        # (дата E с 12:00) и ночной (дата E+1 до 12:00); прежний перебор
+        # конфликтов покрыт этой очисткой. Очистка НЕ ставит пометок в
+        # deleted_nights: замена — не удаление.
+        e_date = _date.fromordinal(
+            evening_key + _date(1970, 1, 1).toordinal())
+        e_plus = (e_date + timedelta(days=1)).isoformat()
+        conn.execute(
+            "DELETE FROM sleep_entries WHERE day=? AND bedtime>='12:00'",
+            (e_date.isoformat(),))
+        conn.execute(
+            "DELETE FROM sleep_entries WHERE day=? AND bedtime<'12:00'",
+            (e_plus,))
 
         conn.execute(
             "INSERT OR REPLACE INTO sleep_entries (day, bedtime) VALUES (?, ?)",
             (day, bedtime))
-        # Новая ночная запись этого вечера «отменяет» память об удалении:
+        # Занятие ночного слота этого вечера «отменяет» память об удалении:
         # слот снова занят легальной записью.
         if new_lvl == 1:
             conn.execute(
                 "DELETE FROM deleted_nights WHERE evening_day=?",
-                (str(core.night_key(core.evening_anchor(day, bedtime))),))
+                (str(evening_key),))
         conn.commit()
     finally:
         conn.close()
