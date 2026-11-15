@@ -2,9 +2,8 @@
 """Точка входа для PyInstaller-сборки SleepTracker.
 
 Маршрутизация:
-    sleeptracker.exe              -> запуск локального Flask-сервера
-                                     + автоматическое открытие браузера
-    sleeptracker.exe --import c.csv -> импорт истории из CSV (CLI)
+    sleeptracker.exe -> запуск локального Flask-сервера
+                        + автоматическое открытие браузера
 """
 
 import socket
@@ -51,15 +50,6 @@ def run_server():
 
 
 def main():
-    args = sys.argv[1:]
-    if args and args[0] == "--import":
-        rest = [a for a in args[1:] if a != "--dry-run"]
-        dry_run = "--dry-run" in args[1:]
-        if len(rest) < 1:
-            print("Использование: sleeptracker --import <файл.csv> [--dry-run]")
-            return 2
-        from import_history import import_csv
-        return import_csv(rest[0], dry_run=dry_run)
     run_server()
     return 0
 

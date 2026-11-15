@@ -1,6 +1,6 @@
 *.db
-*.db.bak*
 __pycache__/
+.pytest_cache/
 *.pyc
 venv/
 .env
@@ -8,12 +8,7 @@ dist/
 build/
 *.spec
 *.exe
-server.log
-server.info
-*_fallback.log
-history.csv
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-*.bundle

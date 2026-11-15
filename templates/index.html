@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Учёт сна</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ url_for('static', filename='js/chart.umd.min.js') }}"></script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -73,6 +73,50 @@
   form.del button { background: #c94040; padding: 5px 12px; min-width: 60px; }
   form.del button:hover { background: #e05555; }
   .empty { color: #8b94a7; font-style: italic; padding: 12px 0; }
+  .flash {
+    background: #2b1d26; border: 1px solid #f06a6a; color: #f06a6a;
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+    font-size: 14px;
+  }
+  /* Блок ghost-разблокировки (v0.10.0): нейтральный стиль — это
+     вспомогательное действие, а не ошибка (в отличие от .flash) */
+  .ghost-block { display: flex; flex-direction: column; gap: 8px;
+                 margin-bottom: 16px; }
+  .ghost-row {
+    display: flex; gap: 10px; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; background: #232b3d; border: 1px solid #3a4356;
+    border-radius: 8px; padding: 10px 14px; font-size: 14px; color: #c3cadb;
+  }
+  form.unlock { display: inline; }
+  form.unlock button { padding: 6px 12px; min-width: 0; font-size: 13px; }
+  .ghost-actions { display: flex; gap: 8px; align-items: center; }
+  .ghost-hide {
+    padding: 6px 10px; min-width: 0; font-size: 13px;
+    background: transparent; border: 1px solid #3a4356; color: #8b94a7;
+  }
+  .ghost-hide:hover { border-color: #8b94a7; color: #e6eaf2; }
+  /* Диалог подтверждений (v0.9.0): палитра .panel/.flash, ::backdrop — затемнение */
+  dialog#app-dialog {
+    background: #1a2130; color: #e6eaf2; border: 1px solid #3a4356;
+    border-radius: 12px; padding: 18px 20px;
+    max-width: 380px; width: calc(100% - 32px);
+    box-shadow: 0 8px 30px rgba(0,0,0,.5);
+  }
+  dialog#app-dialog:not([open]) { display: none; }
+  dialog#app-dialog::backdrop { background: rgba(8, 11, 18, .72); }
+  dialog#app-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+  dialog#app-dialog p { margin: 0 0 16px; font-size: 14px;
+                        color: #c3cadb; line-height: 1.45; }
+  .app-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+  .app-dialog-actions button {
+    background: #2a3550; color: #e6eaf2; border: none; border-radius: 8px;
+    padding: 8px 14px; font-size: 14px; cursor: pointer; min-width: 0;
+  }
+  .app-dialog-actions button:hover { background: #3a4560; }
+  .app-dialog-actions button#appDialogOk { background: #2f6fed; color: #fff; }
+  .app-dialog-actions button#appDialogOk:hover { background: #4b82f5; }
+  .app-dialog-actions button#appDialogOk.danger { background: #c94040; }
+  .app-dialog-actions button#appDialogOk.danger:hover { background: #e05555; }
   a.more { color: #6f9bff; }
 </style>
 </head>
@@ -117,16 +161,16 @@
   </div>
 
   <div class="panel chart-panel">
-    {% if chart_data_json %}
+    {% if chart_data %}
     <div class="period-selector">
-      <button data-period="week">Неделя</button>
-      <button data-period="2weeks">2 недели</button>
-      <button data-period="month">Месяц</button>
-      <button data-period="3months">3 месяца</button>
-      <button data-period="6months">Полгода</button>
-      <button data-period="year">Год</button>
-      <button data-period="calendar_year">Календарный год</button>
-      <button data-period="all_time">За всё время</button>
+      <button data-period="week" aria-pressed="false">Неделя</button>
+      <button data-period="2weeks" aria-pressed="false">2 недели</button>
+      <button data-period="month" aria-pressed="false">Месяц</button>
+      <button data-period="3months" aria-pressed="false">3 месяца</button>
+      <button data-period="6months" aria-pressed="false">Полгода</button>
+      <button data-period="year" aria-pressed="false">Год</button>
+      <button data-period="calendar_year" aria-pressed="false">Календарный год</button>
+      <button data-period="all_time" aria-pressed="false">За всё время</button>
     </div>
     <div class="chart-box">
       <canvas id="sleepChart"></canvas>
@@ -135,6 +179,32 @@
       <div class="empty">Добавьте первую запись, чтобы увидеть график.</div>
     {% endif %}
   </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    <div class="flash">
+      {% for m in messages %}<div>{{ m }}</div>{% endfor %}
+    </div>
+    {% endif %}
+  {% endwith %}
+
+  {% if ghosted_nights %}
+  <div class="ghost-block">
+    {% for g in ghosted_nights %}
+    <div class="ghost-row">
+      <span>Ночная запись для вечера {{ g.human }} удалена — повторный ввод заблокирован</span>
+      <span class="ghost-actions">
+        <button type="button" class="ghost-hide" data-ghost-hide>Скрыть</button>
+        <form class="unlock" method="post" action="/unlock_night"
+              data-evening="{{ g.human }}">
+          <input type="hidden" name="evening_day" value="{{ g.iso }}">
+          <button type="submit">Разрешить повторный ввод</button>
+        </form>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   <div class="panel">
     <form class="inline-form" method="post" action="/save">
@@ -196,9 +266,125 @@
     {% endif %}
   </div>
 </div>
-{% if chart_data_json %}
+
+<!-- Каркас диалогов (v0.9.0): подтверждения и уведомления в стиле приложения.
+     Единый хелпер для всех будущих фич (Этапы 2–3); системный confirm() не используется. -->
+<dialog id="app-dialog">
+  <h2 id="appDialogTitle"></h2>
+  <p id="appDialogMessage"></p>
+  <div class="app-dialog-actions">
+    <button type="button" id="appDialogCancel">Отмена</button>
+    <button type="button" id="appDialogOk">Подтвердить</button>
+  </div>
+</dialog>
+
 <script>
-  const chartData = {{ chart_data_json | safe }};
+  // --- showConfirm / showAlert: переиспользуемый каркас диалогов ----------
+  // Нативный <dialog> + showModal(): ноль зависимостей, a11y из коробки
+  // (focus trap, Esc), работает в браузерах Windows 7.
+  //   showConfirm({ title, message, okText = 'Подтвердить', danger = false })
+  //       -> Promise<boolean>  (true — только по кнопке подтверждения;
+  //          Esc / «Отмена» / клик по затемнению дают false)
+  //   showAlert({ title, message, okText = 'ОК' }) -> Promise<boolean>
+  //       (режим одной кнопки; будущие уведомления — только через него)
+  // Никаких новых системных confirm()/alert() в проекте.
+  (function () {
+    'use strict';
+    var dlg = document.getElementById('app-dialog');
+    var titleEl = document.getElementById('appDialogTitle');
+    var msgEl = document.getElementById('appDialogMessage');
+    var okBtn = document.getElementById('appDialogOk');
+    var cancelBtn = document.getElementById('appDialogCancel');
+    var confirmed = false;
+    var resolver = null;
+
+    dlg.addEventListener('close', function () {
+      var done = resolver;
+      resolver = null;
+      okBtn.classList.remove('danger');
+      if (done) done(confirmed);
+    });
+    dlg.addEventListener('click', function (e) {
+      // Клик по затемнению (::backdrop) — трактуем как отмену
+      if (e.target === dlg) { confirmed = false; dlg.close(); }
+    });
+
+    okBtn.addEventListener('click', function () {
+      confirmed = true;
+      dlg.close();
+    });
+    cancelBtn.addEventListener('click', function () {
+      confirmed = false;
+      dlg.close();
+    });
+
+    function showDialog(opts) {
+      var o = opts || {};
+      titleEl.textContent = o.title || 'SleepTracker';
+      msgEl.textContent = o.message || '';
+      okBtn.textContent = o.okText || 'Подтвердить';
+      okBtn.classList.toggle('danger', !!o.danger);
+      cancelBtn.textContent = o.cancelText || 'Отмена';
+      cancelBtn.hidden = !!o.okOnly;
+      confirmed = false;
+      dlg.showModal();
+      // Фокус на безопасном действии (a11y); Esc закрывает нативно.
+      (o.okOnly ? okBtn : cancelBtn).focus();
+      return new Promise(function (resolve) { resolver = resolve; });
+    }
+
+    window.showConfirm = function (opts) {
+      return showDialog(Object.assign({ danger: false }, opts));
+    };
+    window.showAlert = function (opts) {
+      return showDialog(Object.assign({ okOnly: true }, opts));
+    };
+
+    // Удаление записи: подтверждение в стиле приложения; при подтверждении —
+    // программная отправка формы.
+    document.querySelectorAll('form.del').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        showConfirm({
+          title: 'Удаление записи',
+          message: 'Удалить запись? Действие нельзя отменить.',
+          okText: 'Удалить',
+          danger: true
+        }).then(function (ok) { if (ok) form.submit(); });
+      });
+    });
+
+    // Разблокировка ночного слота (v0.10.0): первое переиспользование каркаса
+    // showConfirm. Отмена/Esc/затемнение — ничего не происходит.
+    document.querySelectorAll('form.unlock').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        showConfirm({
+          title: 'Разблокировка ночного слота',
+          message: 'Разрешить повторный ввод ночной записи для вечера ' +
+                   form.dataset.evening +
+                   '? Защита от случайной перезаписи для этого вечера будет снята.',
+          okText: 'Разрешить',
+          danger: false
+        }).then(function (ok) { if (ok) form.submit(); });
+      });
+    });
+
+    // Скрытие ghost-уведомлений (v0.11.0): прячет строку только в текущем
+    // просмотре; серверное состояние не меняется — после перезагрузки
+    // страницы блок вернётся, пока существует память в deleted_nights.
+    // После разблокировки строка исчезает навсегда (роут /unlock_night).
+    document.querySelectorAll('[data-ghost-hide]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var row = btn.closest('.ghost-row');
+        if (row) row.style.display = 'none';
+      });
+    });
+  })();
+</script>
+{% if chart_data %}
+<script>
+  const chartData = {{ chart_data | tojson }};
 
   // --- Фильтрация данных по выбранному периоду -------------------------
   // Полные даты ("YYYY-MM-DD") нужны только для фильтрации; на оси X
@@ -212,6 +398,37 @@
                           '6months': 'за полгода', year: 'за год',
                           calendar_year: 'за календарный год',
                           all_time: 'за всё время' };
+
+  // --- Период: подсветка + сохранение в localStorage (v0.10.0) ------------
+  // Активная кнопка получает .active + aria-pressed="true" (a11y); выбор
+  // периода переживает перезагрузку страницы и правки записей. Storage
+  // может быть недоступен (приватный режим) — это не должно ломать страницу.
+  const PERIOD_STORAGE_KEY = 'sleepTrackerPeriod';
+
+  function isKnownPeriod(period) {
+    return period === 'all_time' || period === 'calendar_year' ||
+           !!PERIOD_DAYS[period];
+  }
+
+  function persistPeriod(period) {
+    try { localStorage.setItem(PERIOD_STORAGE_KEY, period); } catch (err) {}
+  }
+
+  function restorePeriod() {
+    try {
+      const saved = localStorage.getItem(PERIOD_STORAGE_KEY);
+      if (saved && isKnownPeriod(saved)) return saved;
+    } catch (err) {}
+    return 'all_time';   // период по умолчанию
+  }
+
+  function setActivePeriod(period) {
+    document.querySelectorAll('.period-selector button').forEach(function (b) {
+      const on = b.dataset.period === period;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
 
   function filterByPeriod(period) {
     if (!chartData || !chartData.length) return [];
@@ -369,9 +586,10 @@
   let chart = null;
   try {
     if (typeof Chart === 'undefined') {
-      throw new Error('Chart.js не загружен (нет доступа к CDN)');
+      throw new Error('Chart.js не загружен (нет static/js/chart.umd.min.js)');
     }
-    const initial = filterByPeriod('all_time');
+    const activePeriod = restorePeriod();     // последний выбор пользователя
+    const initial = filterByPeriod(activePeriod);
     chart = new Chart(document.getElementById('sleepChart'), {
       type: 'line',
       data: {
@@ -420,7 +638,8 @@
         }
       }
     });
-    updateStatsCard(initial, 'all_time');     // базовое значение = активный период
+    setActivePeriod(activePeriod);            // подсветка + aria при загрузке
+    updateStatsCard(initial, activePeriod);   // базовое значение = активный период
     updateRecordCards(initial);               // карточки рекордов по активному периоду
   } catch (err) {
     console.error('Ошибка инициализации графика:', err);
@@ -429,16 +648,15 @@
   // --- Переключение периода ------------------------------------------------
   document.querySelectorAll('.period-selector button').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.period-selector button')
-              .forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
       const period = btn.dataset.period;
+      setActivePeriod(period);                // подсветка обновляется сразу
+      persistPeriod(period);                 // выбор переживает перезагрузку
       const filtered = filterByPeriod(period);
       if (chart) {
         applyPeriodToChart(chart, filtered);   // данные + динамическая ось Y
         chart.update();                        // перерисовка с новой осью Y
       }
-      updateStatsCard(filtered, btn.dataset.period);
+      updateStatsCard(filtered, period);
       updateRecordCards(filtered);
     });
   });

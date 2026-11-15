@@ -3,16 +3,18 @@ REM Сборка SleepTracker в .exe через PyInstaller
 cd /d "%~dp0"
 
 pip install pyinstaller || goto :err
-REM --onedir: exe и папка sleeptracker_files лежат в dist\, база sleep.db
-REM создаётся РЯДОМ С EXE (не внутри временной папки), поэтому история
-REM переживает перезапуск и обновление программы.
-pyinstaller --onedir --name sleeptracker ^
-    --hidden-import matplotlib ^
-    --collect-submodules matplotlib ^
+REM --onedir (актуальный layout PyInstaller 6): exe и папка _internal лежат
+REM в dist\SleepTracker\, база sleep.db создаётся РЯДОМ С EXE (не внутри
+REM временной папки), поэтому история переживает перезапуск и обновление
+REM программы.
+pyinstaller --onedir --name SleepTracker ^
+    --add-data "templates;templates" ^
+    --add-data "static;static" ^
+    --hidden-import core ^
     launcher.py || goto :err
 
 echo.
-echo Готово: dist\sleeptracker\sleeptracker.exe
+echo Готово: dist\SleepTracker\SleepTracker.exe
 echo   База данных sleep.db будет создана рядом с exe.
 goto :eof
 

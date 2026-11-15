@@ -1,3 +1,4 @@
 # Runtime-зависимости SleepTracker (точные версии для воспроизводимых сборок).
-# Python 3.8.6 (Windows 7). График строится на Chart.js (CDN) — matplotlib не нужен.
+# Python 3.8.6 (Windows 7). График строится на Chart.js (локальная копия
+# в static/js/) — matplotlib не нужен.
 flask==3.0.3
