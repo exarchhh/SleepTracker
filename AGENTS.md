@@ -69,6 +69,12 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 
 - Вся разработка ведётся **только в ветке `dev`**. Push в `main` **никогда** не
   выполняется.
+- **Ветка `dev` пересоздаётся из main после каждого слияния:** squash-merge
+  создаёт на main новый коммит, старая dev перестаёт быть потомком main,
+  merge-base устаревает — PR дают фантомные конфликты (кейс PR #12). Перед
+  новой задачей: `git fetch origin && git checkout -B dev origin/main`;
+  незалитые хвосты переносятся cherry-pick; старые коммиты не теряются
+  (Restore branch на PR либо `refs/pull/<N>/head`).
 - Не делай merge `main` в `dev` без прямой команды владельца в процессе работы
   над задачей.
 - Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`.
@@ -81,6 +87,13 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 ## 5. Версии
 
 Единственная точка истины — строка `VERSION` в `app.py` (формат `MAJ.MIN.PATCH`).
+
+**Правило «четырёх точек версии».** Версия синхронизируется в четырёх местах:
+`VERSION` в `app.py`, строка «Текущая версия» в `README.md`, футер
+`BACKLOG.md`, верхняя запись `CHANGELOG.md`. В конце каждой задачи —
+grep-самопроверка: в README/BACKLOG не должно остаться версии старше текущей
+(для линейки 0.1x: `grep -rn "0\.1[0-9]\.0" README.md BACKLOG.md` не находит
+версию старше текущей). Несоответствие любой точки = незакрытая задача.
 
 - Каждый пуш в `dev` = повышение версии **тем же коммитом**, что и изменения:
   **MINOR** — новая фича, **PATCH** — фикс/рефакторинг/документация.
@@ -96,6 +109,7 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 **Чек-лист перед пушем:**
 - [ ] `VERSION` повышен;
 - [ ] `CHANGELOG.md` дополнен;
+- [ ] синхрон «четырёх точек версии» (README, футер BACKLOG, верхняя запись CHANGELOG) и grep-самопроверка старых версий пройдены;
 - [ ] pytest зелёный;
 - [ ] работаю в `dev`.
 
@@ -169,4 +183,4 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 
 ---
 
-*Последнее обновление: v0.10.0*
+*Последнее обновление: v0.11.1*
