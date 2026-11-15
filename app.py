@@ -47,7 +47,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.11.0"          # MAJ.MIN.PATCH — синхронно с README.md
+VERSION = "0.11.1"          # MAJ.MIN.PATCH — синхронно с README.md
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода

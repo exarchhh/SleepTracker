@@ -2,8 +2,8 @@
 """Точка входа для PyInstaller-сборки SleepTracker.
 
 Маршрутизация:
-    sleeptracker.exe -> запуск локального Flask-сервера
-                        + автоматическое открытие браузера
+    SleepTracker.exe -> запуск локального Flask-сервера
+                       + автоматическое открытие браузера
 """
 
 import socket
