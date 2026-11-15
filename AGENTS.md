@@ -69,11 +69,12 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 
 - Вся разработка ведётся **только в ветке `dev`**. Push в `main` **никогда** не
   выполняется.
-- **Ветка `dev` постоянна:** после squash-merge следующая задача продолжает
-  работу в `dev`; удалять её не нужно. Если ветка всё же удалена —
-  восстановление: кнопка Restore branch на странице влитого PR либо
-  `git fetch origin pull/<N>/head:dev && git push origin dev` (удаление ветки
-  стирает только указатель — коммиты остаются доступны как ref PR).
+- **Ветка `dev` пересоздаётся из main после каждого слияния:** squash-merge
+  создаёт на main новый коммит, старая dev перестаёт быть потомком main,
+  merge-base устаревает — PR дают фантомные конфликты (кейс PR #12). Перед
+  новой задачей: `git fetch origin && git checkout -B dev origin/main`;
+  незалитые хвосты переносятся cherry-pick; старые коммиты не теряются
+  (Restore branch на PR либо `refs/pull/<N>/head`).
 - Не делай merge `main` в `dev` без прямой команды владельца в процессе работы
   над задачей.
 - Conventional Commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`.
