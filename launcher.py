@@ -50,6 +50,10 @@ def run_server():
 
 
 def main():
+    if "--version" in sys.argv:
+        from app import VERSION
+        print("SleepTracker v%s" % VERSION)
+        return 0
     run_server()
     return 0
 

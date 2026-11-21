@@ -118,12 +118,18 @@
   .app-dialog-actions button#appDialogOk.danger { background: #c94040; }
   .app-dialog-actions button#appDialogOk.danger:hover { background: #e05555; }
   a.more { color: #6f9bff; }
+  /* Футер версии (v0.11.2): единственное место с версией на странице,
+     нейтральный мелкий текст в палитре подписей */
+  .page-footer {
+    text-align: center; color: #8b94a7; font-size: 12px;
+    margin-top: 28px; padding-top: 12px; border-top: 1px solid #262f42;
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🌙 Учёт сна</h1>
-  <p class="subtitle">Отбой вовремя — штраф меньше. Идеальное время: 23:00. Версия {{ version }}</p>
+  <p class="subtitle">Отбой вовремя — штраф меньше. Идеальное время: 23:00.</p>
 
   <div class="cards">
     <div class="card">
@@ -265,6 +271,8 @@
     </div>
     {% endif %}
   </div>
+
+  <footer class="page-footer">SleepTracker v{{ version }}</footer>
 </div>
 
 <!-- Каркас диалогов (v0.9.0): подтверждения и уведомления в стиле приложения.
