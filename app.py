@@ -4,6 +4,7 @@
 Основная логика расчёта штрафа вынесена в модуль `core` (см. core.compute_state).
 """
 
+import math
 import os
 import shutil
 import sqlite3
@@ -47,7 +48,10 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.11.2"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
+VERSION = "0.12.0"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
+
+COLOR_WINDOW_DAYS = 90   # окно якоря окраски, дней (DECISIONS 25; кандидат в настройки — BACKLOG, Этап 2)
+COLOR_FLOOR_MIN = 120    # floor якоря окраски, минут (DECISIONS 25; кандидат в настройки)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода
@@ -91,26 +95,40 @@ def init_db():
 # Данные для графика (Chart.js)
 # ---------------------------------------------------------------------------
 
+def _effective_evening_date(r):
+    """Эффективная дата вечера записи state (datetime.date).
+
+    Ночная запись (level 1) относится к предыдущему вечеру через
+    core.effective_evening — общий способ build_chart_data (дисплейная
+    дата) и compute_color_anchor (окно якоря окраски). Поведение не
+    меняется.
+    """
+    if r["level"] == 1:
+        disp_day, _, _ = core.effective_evening(
+            r["input_day"], r["input_bedtime"])
+    else:
+        disp_day = r["input_day"]
+    return datetime.strptime(disp_day, "%Y-%m-%d").date()
+
+
 def build_chart_data(state):
     """Список [{'date': 'DD.MM', 'full_date': ISO, 'fine': N,
-    'bedtime_min': M, 'delta': D}, ...] для фронтенда (Chart.js).
+    'bedtime_min': M, 'delta': D, 'fine_gain': G}, ...] для фронтенда
+    (Chart.js).
 
     Каждая запись state -> точка на графике: эффективная дата вечера
     (ночные сдвиги относятся к предыдущему вечеру) и штраф после вечера.
     bedtime_min — минуты отбоя относительно полудня предыдущего дня
     (послеполуночный отбой даёт >720), нужен для динамического среднего.
     delta — отклонение отбоя от идеала в минутах (>0 опоздание, <0 ранний
-    отбой), берётся из уже посчитанного state; логика расчёта штрафа НЕ
-    затрагивается — только обогащение данных для фронтенда (тултипы).
+    отбой), берётся из уже посчитанного state. fine_gain — прирост/сгорание
+    штрафа за вечер (fine_after − fine_before), нужен для тултипа. Логика
+    расчёта штрафа НЕ затрагивается — только обогащение данных для
+    фронтенда (тултипы).
     """
     chart_data = []
     for idx, r in enumerate(state):
-        if r["level"] == 1:
-            disp_day, _, _ = core.effective_evening(
-                r["input_day"], r["input_bedtime"])
-        else:
-            disp_day = r["input_day"]
-        d = datetime.strptime(disp_day, "%Y-%m-%d")
+        d = _effective_evening_date(r)
         hh, mm = map(int, r["input_bedtime"].split(":"))
         # Отбой после полуночи — продолжение предыдущего вечера:
         # нормализуем к единой шкале вечера (23:00 -> 1380, 01:30 -> 1530),
@@ -125,6 +143,7 @@ def build_chart_data(state):
                            "fine": r["fine_after"],
                            "bedtime_min": bedtime_min,
                            "delta": r.get("delta", 0),
+                           "fine_gain": r["fine_after"] - r["fine_before"],
                            "_order": idx})
     # Гарантируем сортировку по дате и хронологии внутри вечера
     # (вечерняя запись lvl0 раньше ночной lvl1). Chart.js рисует линию
@@ -134,6 +153,41 @@ def build_chart_data(state):
     for p in chart_data:
         del p["_order"]
     return chart_data
+
+
+# ---------------------------------------------------------------------------
+# Двойной формат штрафа и якорь окраски (v0.12.0 — только чтение state)
+# ---------------------------------------------------------------------------
+
+def fmt_fine(m):
+    """Двойной формат штрафа: «N мин» / «N мин · H ч [M мин]» (Приложение Б.1)."""
+    if m < 60:
+        return "%d мин" % m
+    h, mm = divmod(m, 60)
+    if mm:
+        return "%d мин · %d ч %d мин" % (m, h, mm)
+    return "%d мин · %d ч" % (m, h)
+
+
+def compute_color_anchor(state, today=None):
+    """Якорь единой шкалы окраски штрафа (Приложение Б.2; DECISIONS 25).
+
+    max(COLOR_FLOOR_MIN, P95 штрафов за окно COLOR_WINDOW_DAYS дней от
+    today) — вариант «О3»: устойчив к единичному рекорду (P95 выброс
+    отбрасывает) и «оживает» после возврата к нулю (окно очищается —
+    первый срыв виден сразу). Перцентиль — nearest-rank:
+    sorted_fines[ceil(0.95 * n) - 1]. Дата записи — эффективная дата
+    вечера (ночная запись относится к предыдущему вечеру), штраф записи —
+    fine_after. Пустое окно или все штрафы окна 0 -> floor.
+    """
+    today = today or _date.today()
+    window_start = today - timedelta(days=COLOR_WINDOW_DAYS - 1)
+    fines = sorted(r["fine_after"] for r in state
+                   if window_start <= _effective_evening_date(r) <= today)
+    if not fines:
+        return COLOR_FLOOR_MIN
+    p95 = fines[math.ceil(0.95 * len(fines)) - 1]
+    return max(COLOR_FLOOR_MIN, p95)
 
 
 # ---------------------------------------------------------------------------
@@ -259,10 +313,8 @@ def index():
             delta_class = "delta-neg"
         else:
             delta_text, delta_class = "0", ""
-        fine = r["fine_after"]
-        fine_class_row = "green" if fine == 0 else ("yellow" if fine < 300 else "red")
         rows.append({**r, "day_human": day_human, "delta_text": delta_text,
-                     "delta_class": delta_class, "fine_class_row": fine_class_row})
+                     "delta_class": delta_class})
 
     if state:
         current_fine = state[-1]["fine_after"]
@@ -272,8 +324,6 @@ def index():
             last["input_bedtime"])
     else:
         current_fine, last_bedtime = 0, None
-    fine_class = "green" if current_fine == 0 else (
-        "yellow" if current_fine < 300 else "red")
 
     chart_data = build_chart_data(state)
 
@@ -306,7 +356,7 @@ def index():
         rows=rows,
         chart_data=chart_data,
         current_fine=current_fine,
-        fine_class=fine_class,
+        color_anchor=compute_color_anchor(state),
         last_bedtime=last_bedtime,
         total_count=total_count,
         current_streak=current_streak,
