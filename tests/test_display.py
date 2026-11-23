@@ -10,6 +10,7 @@ compute_color_anchor — якорь единой шкалы max(floor, P95 neare
 
 import math
 import re
+import sqlite3
 from datetime import date, timedelta
 
 import app as app_module
@@ -26,12 +27,80 @@ def _rec(days_ago, fine):
 
 
 def test_fmt_fine_cases():
-    """Двойной формат: все кейсы §2.8.1 паспорта."""
+    """Двойной формат: все кейсы §2.8.1 паспорта (units v2: «м» в паре ч/м)."""
     cases = [(0, "0 мин"), (45, "45 мин"), (59, "59 мин"), (60, "60 мин · 1 ч"),
-             (120, "120 мин · 2 ч"), (2676, "2676 мин · 44 ч 36 мин"),
-             (3639, "3639 мин · 60 ч 39 мин")]
+             (120, "120 мин · 2 ч"), (2676, "2676 мин · 44 ч 36 м"),
+             (3639, "3639 мин · 60 ч 39 м")]
     for m, expected in cases:
         assert app_module.fmt_fine(m) == expected
+
+
+def test_fmt_fine_parts_cases():
+    """fmt_fine_parts (§2.8.2): строка 1 «N мин», hm пуст при m < 60."""
+    cases = [(0, ("0 мин", "")), (45, ("45 мин", "")), (60, ("60 мин", "1 ч")),
+             (120, ("120 мин", "2 ч")), (2676, ("2676 мин", "44 ч 36 м"))]
+    for m, expected in cases:
+        parts = app_module.fmt_fine_parts(m)
+        assert (parts["min"], parts["hm"]) == expected
+
+
+def _seed_history(db_path, count=25):
+    """Наполняет временную БД count вечерними записями (23:30, без cap)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO sleep_entries (day, bedtime) VALUES (?, ?)",
+            [("2026-10-%02d" % d, "23:30") for d in range(1, count + 1)])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_index_show_count_default_and_invalid(app_client, empty_db):
+    """Порция истории (§2.8.3, Б.2): отсутствие/мусор/0 -> HISTORY_STEP."""
+    _seed_history(empty_db)
+    for query in ("", "?show_count=abc", "?show_count=0"):
+        html = app_client.get("/" + query).get_data(as_text=True)
+        assert html.count('data-fine="') == app_module.HISTORY_STEP
+
+
+def test_index_show_count_explicit_and_all(app_client, empty_db):
+    """show_count=20 -> 20 строк; show_all=1 -> все 25, ссылка «еще» скрыта."""
+    _seed_history(empty_db)
+    html = app_client.get("/?show_count=20").get_data(as_text=True)
+    assert html.count('data-fine="') == 20
+    html = app_client.get("/?show_all=1").get_data(as_text=True)
+    assert html.count('data-fine="') == 25
+    assert "?show_count=" not in html
+
+
+def test_index_renders_pagination_links_and_fine_parts(app_client, empty_db):
+    """GET / (§2.8.4): обе ссылки подгрузки, data-fine-min/-hm, pointsToggle."""
+    _seed_history(empty_db)
+    html = app_client.get("/").get_data(as_text=True)
+    assert 'href="?show_count=20"' in html      # 10 + HISTORY_STEP
+    assert "Показать еще 10" in html
+    assert 'href="?show_all=1"' in html
+    assert 'data-fine-min="' in html            # карточка «Текущий штраф», стр. 1
+    assert 'data-fine-hm="' in html             # строка 2 (приглушённая)
+    assert 'id="pointsToggle"' in html          # переключатель «Точки»
+    # data-fine в ячейках истории сохранён (полный формат одной строкой)
+    assert html.count('data-fine="') == app_module.HISTORY_STEP
+
+
+def test_index_renders_cap_info_only_for_capped(app_client, empty_db):
+    """ⓘ у «(cap)» (§2.8.4): только у capped-записи; лимит не хардкод.
+
+    22:00 при штрафе 150 (delta -60 < MAX, сгорает часть, не до нуля) —
+    uncapped; 20:00 при штрафе 90 (delta -180 > MAX) — capped.
+    """
+    app_client.post("/save", data={"day": "2026-10-20", "bedtime": "01:30"})
+    app_client.post("/save", data={"day": "2026-10-21", "bedtime": "22:00"})
+    app_client.post("/save", data={"day": "2026-10-22", "bedtime": "20:00"})
+    html = app_client.get("/").get_data(as_text=True)
+    assert html.count('class="cap-info"') == 1, "cap-info не у одной записи"
+    assert "(cap)" in html
+    assert "не больше %d минут" % MAX_BURN_PER_DAY in html
 
 
 def test_anchor_empty_state_returns_floor():
@@ -104,7 +173,7 @@ def test_fine_gain_late_evening():
 
 
 def test_fine_gain_burn_capped_minus_max():
-    """Ранний отбой при штрафе > 0 и |delta| > MAX_BURN_PER_DAY: gain = -max."""
+    """Граница лимита (§2.8.5): |delta| == MAX_BURN_PER_DAY -> gain = -max."""
     entries = [
         {"day": "2026-10-20", "bedtime": "01:30"},   # ночь вечера 10-19: +150
         {"day": "2026-10-20", "bedtime": "21:00"},   # delta -120, сгорает 120
@@ -117,6 +186,27 @@ def test_fine_gain_burn_capped_minus_max():
     data = app_module.build_chart_data(state)
     gain = [d for d in data if d["full_date"] == "2026-10-20"
             and d["bedtime_min"] == 21 * 60][0]["fine_gain"]
+    assert gain == -MAX_BURN_PER_DAY
+
+
+def test_fine_gain_burn_exceeds_cap():
+    """Превышение лимита (§2.8.5, ревью №9): |delta| > MAX -> сгорает max.
+
+    Отбой 20:00 (delta -180) при штрафе 150: сгорает ровно
+    MAX_BURN_PER_DAY (120), не вся дельта; fine_gain == -MAX_BURN_PER_DAY.
+    """
+    entries = [
+        {"day": "2026-10-20", "bedtime": "01:30"},   # ночь вечера 10-19: +150
+        {"day": "2026-10-20", "bedtime": "20:00"},   # delta -180, сгорает 120
+    ]
+    state = compute_state(entries)
+    row = [r for r in state if r["day"] == "2026-10-20"
+           and r["input_bedtime"] == "20:00"][0]
+    assert row["delta"] == -180
+    assert row["capped"] is True
+    data = app_module.build_chart_data(state)
+    gain = [d for d in data if d["full_date"] == "2026-10-20"
+            and d["bedtime_min"] == 20 * 60][0]["fine_gain"]
     assert gain == -MAX_BURN_PER_DAY
 
 

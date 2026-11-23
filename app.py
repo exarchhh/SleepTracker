@@ -48,10 +48,11 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.12.1"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
+VERSION = "0.13.0"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
 
 COLOR_WINDOW_DAYS = 90   # окно якоря окраски, дней (DECISIONS 25; кандидат в настройки — BACKLOG, Этап 2)
 COLOR_FLOOR_MIN = 120    # floor якоря окраски, минут (DECISIONS 25; кандидат в настройки)
+HISTORY_STEP = 10   # порция подгрузки истории (кандидат в настройки — BACKLOG, Этап 2)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(32)  # нужен для flash-сообщений об ошибках ввода
@@ -160,13 +161,22 @@ def build_chart_data(state):
 # ---------------------------------------------------------------------------
 
 def fmt_fine(m):
-    """Двойной формат штрафа: «N мин» / «N мин · H ч [M мин]» (Приложение Б.1)."""
+    """Двойной формат штрафа v2: «N мин» / «N мин · H ч [M м]» (Приложение Б.1)."""
     if m < 60:
         return "%d мин" % m
     h, mm = divmod(m, 60)
     if mm:
-        return "%d мин · %d ч %d мин" % (m, h, mm)
+        return "%d мин · %d ч %d м" % (m, h, mm)
     return "%d мин · %d ч" % (m, h)
+
+
+def fmt_fine_parts(m):
+    """Карточки: строка 1 «N мин», строка 2 «H ч [M м]» (пусто при m < 60)."""
+    if m < 60:
+        return {"min": "%d мин" % m, "hm": ""}
+    h, mm = divmod(m, 60)
+    return {"min": "%d мин" % m,
+            "hm": ("%d ч %d м" % (h, mm)) if mm else ("%d ч" % h)}
 
 
 def compute_color_anchor(state, today=None):
@@ -273,9 +283,19 @@ def _post_guard():
 # Роуты
 # ---------------------------------------------------------------------------
 
+def _show_count(raw):
+    """Порция истории: int >= 1; мусор/отсутствие -> HISTORY_STEP (Б.2)."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return HISTORY_STEP
+    return n if n >= 1 else HISTORY_STEP
+
+
 @app.route("/")
 def index():
     show_all = request.args.get("show_all", "0") == "1"
+    show_count = _show_count(request.args.get("show_count"))
     conn = get_db()
     try:
         db_rows = conn.execute(
@@ -292,8 +312,9 @@ def index():
     entries = [{"day": r["day"], "bedtime": r["bedtime"]} for r in db_rows]
     state = core.compute_state(entries)
     total_count = len(state)
-    # История показывается от последней даты к более ранним.
-    view = (state if show_all else state[-10:])[::-1]
+    # История показывается от последней даты к более ранним; show_all=1
+    # перекрывает порцию show_count (рендерит всё, ссылка «еще» скрыта).
+    view = (state if show_all else state[-show_count:])[::-1]
 
     rows = []
     for r in view:
@@ -324,6 +345,7 @@ def index():
             last["input_bedtime"])
     else:
         current_fine, last_bedtime = 0, None
+    current_hm = fmt_fine_parts(current_fine)["hm"]
 
     chart_data = build_chart_data(state)
 
@@ -356,6 +378,7 @@ def index():
         rows=rows,
         chart_data=chart_data,
         current_fine=current_fine,
+        current_hm=current_hm,
         color_anchor=compute_color_anchor(state),
         last_bedtime=last_bedtime,
         total_count=total_count,
@@ -363,6 +386,9 @@ def index():
         streak_word=streak_word,
         avg_bedtime=avg_bedtime,
         show_all=show_all,
+        show_count=show_count,
+        history_step=HISTORY_STEP,
+        burn_limit=core.MAX_BURN_PER_DAY,
         today=_date.today().isoformat(),
         version=VERSION,
         ghosted_nights=ghosted_nights,

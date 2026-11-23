@@ -23,6 +23,7 @@
   .card .label { font-size: 12px; color: #8b94a7; text-transform: uppercase;
                  letter-spacing: .04em; }
   .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .card .sub { font-size: 12px; color: #8b94a7; margin-top: 2px; }
   .green  { color: #3ecf7a; }
   .yellow { color: #e8c341; }
   .red    { color: #f06a6a; }
@@ -38,6 +39,7 @@
   }
   .period-selector button:hover { background: #3a4560; }
   .period-selector button.active { background: #2f6fed; color: #fff; }
+  .points-toggle { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 13px; color: #8b94a7; cursor: pointer; }
   #sleepChart { width: 100% !important; }
   form.inline-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
   label.field { font-size: 13px; color: #8b94a7; display: flex;
@@ -118,6 +120,12 @@
   .app-dialog-actions button#appDialogOk.danger { background: #c94040; }
   .app-dialog-actions button#appDialogOk.danger:hover { background: #e05555; }
   a.more { color: #6f9bff; }
+  /* Кружок-«i» у пометки «(cap)»: читается в 13px-строке таблицы;
+     подсказка показывается через .tip-bubble, title — нативный фолбэк (тач) */
+  .cap-info { display: inline-flex; width: 14px; height: 14px; align-items: center; justify-content: center; margin-left: 5px; border: 1px solid #8b94a7; border-radius: 50%; font-size: 10px; color: #8b94a7; cursor: help; }
+  /* Бабл подсказки: fixed + pointer-events:none — не режется контейнером
+     таблицы (overflow-x: auto); палитра — как тултип Chart.js */
+  .tip-bubble { position: fixed; z-index: 20; max-width: 240px; padding: 6px 9px; background: #232b3d; border: 1px solid #3a4356; border-radius: 6px; color: #e6eaf2; font-size: 12px; pointer-events: none; }
   /* Футер версии: единственное место с версией на странице,
      нейтральный мелкий текст в палитре подписей */
   .page-footer {
@@ -134,7 +142,8 @@
   <div class="cards">
     <div class="card">
       <div class="label">Текущий штраф</div>
-      <div class="value" data-fine="{{ current_fine }}">{{ current_fine }} мин</div>
+      <div class="value" data-fine-min="{{ current_fine }}">{{ current_fine }} мин</div>
+      <div class="sub" data-fine-hm="{{ current_fine }}">{{ current_hm }}</div>
     </div>
     <div class="card">
       <div class="label">Записей</div>
@@ -157,6 +166,7 @@
     <div class="card">
       <div class="label">Макс. штраф (в периоде)</div>
       <div class="value" id="maxFineValue">—</div>
+      <div class="sub" id="maxFineSub"></div>
       <div class="label" id="maxFineDate" style="font-size: 11px; margin-top: 4px;"></div>
     </div>
     <div class="card">
@@ -177,6 +187,7 @@
       <button data-period="year" aria-pressed="false">Год</button>
       <button data-period="calendar_year" aria-pressed="false">Календарный год</button>
       <button data-period="all_time" aria-pressed="false">За всё время</button>
+      <label class="points-toggle"><input type="checkbox" id="pointsToggle"> Точки</label>
     </div>
     <div class="chart-box">
       <canvas id="sleepChart"></canvas>
@@ -249,7 +260,7 @@
               <button type="submit">OK</button>
             </form>
           </td>
-          <td class="{{ r.delta_class }}">{{ r.delta_text }}</td>
+          <td class="{{ r.delta_class }}">{{ r.delta_text }}{% if r.capped %}<span class="cap-info" data-tip="Сгорание упёрлось в дневной лимит — не больше {{ burn_limit }} минут за вечер; штраф не опускается ниже 0" title="Сгорание упёрлось в дневной лимит — не больше {{ burn_limit }} минут за вечер; штраф не опускается ниже 0">i</span>{% endif %}</td>
           <td class="mono" data-fine="{{ r.fine_after }}">{{ r.fine_after }}</td>
           <td>
             <form class="del" method="post" action="/delete">
@@ -265,9 +276,7 @@
     </div>
     {% if not show_all and rows|length < total_count %}
     <div style="text-align:center; margin-top:16px;">
-      <a class="more" href="?show_all=1" style="text-decoration:none;">
-        Показать еще ({{ total_count - rows|length }} записей)
-      </a>
+      <a class="more" href="?show_count={{ show_count + history_step }}" style="text-decoration:none;">Показать еще {{ history_step }}</a> · <a class="more" href="?show_all=1" style="text-decoration:none;">Показать все ({{ total_count - rows|length }} записей)</a>
     </div>
     {% endif %}
   </div>
@@ -389,6 +398,32 @@
       });
     });
   })();
+
+  // --- Всплывающая подсказка [data-tip]: общий bubble ----------------------
+  // position: fixed + pointer-events: none — бабл не режется контейнером
+  // таблицы (overflow-x: auto). Показ над элементом с clamp к краям окна,
+  // fallback снизу; атрибут title остаётся нативным фолбэком (тач).
+  (function () {
+    var bubble = document.createElement('div');
+    bubble.className = 'tip-bubble';
+    bubble.hidden = true;
+    document.body.appendChild(bubble);
+    document.querySelectorAll('[data-tip]').forEach(function (el) {
+      el.addEventListener('mouseenter', function () {
+        bubble.textContent = el.dataset.tip;
+        bubble.hidden = false;
+        var r = el.getBoundingClientRect();
+        var left = Math.max(4, Math.min(
+            r.left + r.width / 2 - bubble.offsetWidth / 2,
+            window.innerWidth - bubble.offsetWidth - 4));
+        var top = r.top - bubble.offsetHeight - 6;
+        if (top < 4) top = r.bottom + 6;    // сверху не влезает — снизу
+        bubble.style.left = left + 'px';
+        bubble.style.top = top + 'px';
+      });
+      el.addEventListener('mouseleave', function () { bubble.hidden = true; });
+    });
+  })();
 </script>
 {% if chart_data %}
 <script>
@@ -438,6 +473,37 @@
       b.classList.toggle('active', on);
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
+  }
+
+  // --- Точки линии: авто-скрытие по порогу + ручной переключатель ----------
+  // Авто-режим (нет сохранённого предпочтения): точки скрываются, когда в
+  // периоде больше POINTS_AUTO_MAX точек — на больших периодах они
+  // сливаются. Ручной выбор (чекбокс «Точки») перекрывает авто и живёт в
+  // localStorage, пока пользователь не изменит выбор (сброс — очисткой
+  // ключа, страницы настроек для этого не требуется).
+  const POINT_RADIUS = 3;        // радиус видимой точки
+  const POINT_HOVER_RADIUS = 5;  // радиус точки при наведении
+  const POINTS_AUTO_MAX = 60;    // авто-порог: точек больше — скрыть
+  const POINTS_STORAGE_KEY = 'sleepTrackerPoints';
+
+  function pointsPref() {
+    try { return localStorage.getItem(POINTS_STORAGE_KEY); } catch (err) {}
+    return null;                        // null = авто-режим
+  }
+
+  function pointsVisibleFor(n) {
+    const pref = pointsPref();
+    return pref === null ? n <= POINTS_AUTO_MAX : pref === '1';
+  }
+
+  function applyPointsVisibility() {
+    const on = pointsVisibleFor(currentPeriodData.length);
+    if (chart) {
+      chart.data.datasets[0].pointRadius = on ? POINT_RADIUS : 0;
+      chart.data.datasets[0].pointHoverRadius = on ? POINT_HOVER_RADIUS : 0;
+    }
+    const box = document.getElementById('pointsToggle');
+    if (box) box.checked = on;
   }
 
   function filterByPeriod(period) {
@@ -532,10 +598,12 @@
     const mfDate = document.getElementById('maxFineDate');
     const bsVal = document.getElementById('bestStreakValue');
     const bsDates = document.getElementById('bestStreakDates');
+    const mfSub = document.getElementById('maxFineSub');
     if (mfVal) {
-      mfVal.textContent = mf ? fmtFine(mf.value) : '—';
+      mfVal.textContent = mf ? fmtFineParts(mf.value).min : '—';
       mfVal.style.color = mf ? penaltyColor(mf.value, COLOR_ANCHOR) : '';
     }
+    if (mfSub) mfSub.textContent = mf ? fmtFineParts(mf.value).hm : '';
     if (mfDate) mfDate.textContent = mf ? mf.date : '';
     if (bsVal) bsVal.textContent = bs && bs.count > 0
         ? bs.count + ' дн.' : '—';
@@ -544,11 +612,20 @@
   }
 
   // --- Двойной формат штрафа (зеркало fmt_fine в app.py, Приложение Б.1) -
+  // Одна строка (тултип, история): «N мин» / «N мин · H ч [M м]» (v2: «м»).
   function fmtFine(m) {
     if (m < 60) return m + ' мин';
     const h = Math.floor(m / 60), mm = m % 60;
-    if (mm) return m + ' мин · ' + h + ' ч ' + mm + ' мин';
+    if (mm) return m + ' мин · ' + h + ' ч ' + mm + ' м';
     return m + ' мин · ' + h + ' ч';
+  }
+
+  // Две строки (карточки, зеркало fmt_fine_parts): строка 1 «N мин»,
+  // строка 2 «H ч [M м]», пусто при m < 60.
+  function fmtFineParts(m) {
+    if (m < 60) return { min: m + ' мин', hm: '' };
+    const h = Math.floor(m / 60), mm = m % 60;
+    return { min: m + ' мин', hm: mm ? (h + ' ч ' + mm + ' м') : (h + ' ч') };
   }
 
   // --- Единая шкала окраски штрафа (Приложение Б.3, DECISIONS 25) -------
@@ -588,14 +665,26 @@
     return 'rgb(' + cl[0] + ', ' + cl[1] + ', ' + cl[2] + ')';
   }
 
-  // Перекраска статичных зон (карточка «Текущий штраф», ячейки истории):
-  // текст -> двойной формат, цвет -> единая шкала. Без JS остаётся
-  // серверная разметка «N мин» без цвета — приемлемая деградация.
+  // Перекраска статичных зон (тексты — двойной формат, цвет — единая
+  // шкала). Ячейки истории [data-fine] — полный формат одной строкой +
+  // окраска; карточка «Текущий штраф» — две строки: [data-fine-min] (строка
+  // 1) и [data-fine-hm] (строка 2, без цвета — приглушённая по CSS .sub).
+  // Без JS остаётся серверная разметка «N мин» без цвета — деградация.
   document.querySelectorAll('[data-fine]').forEach(el => {
     const v = parseInt(el.dataset.fine, 10);
     if (isNaN(v)) return;
     el.textContent = fmtFine(v);
     el.style.color = penaltyColor(v, COLOR_ANCHOR);
+  });
+  document.querySelectorAll('[data-fine-min]').forEach(el => {
+    const v = parseInt(el.dataset.fineMin, 10);
+    if (isNaN(v)) return;
+    el.textContent = fmtFineParts(v).min;
+  });
+  document.querySelectorAll('[data-fine-hm]').forEach(el => {
+    const v = parseInt(el.dataset.fineHm, 10);
+    if (isNaN(v)) return;
+    el.textContent = fmtFineParts(v).hm;
   });
 
   // --- Динамическая ось Y: масштаб по отфильтрованному периоду -----------
@@ -641,6 +730,9 @@
     } catch (err) {
       console.error('Не удалось обновить ось Y напрямую:', err);
     }
+    // Точки выставляются ДО update() вызывающей стороны — один апдейт
+    // на смену периода (порог авто-скрытия зависит от длины периода).
+    applyPointsVisibility();
   }
 
   // --- Инициализация графика (с защитой: страница не должна ломаться) ---
@@ -660,8 +752,8 @@
           label: 'Штраф, мин',
           data: initial.map(d => d.fine),
           tension: 0,                 // прямые линии: честные данные без ложных пиков
-          pointRadius: 3,             // видимые точки, окрашенные по значению штрафа
-          pointHoverRadius: 5,
+          pointRadius: POINT_RADIUS,  // видимые точки, окрашенные по значению штрафа
+          pointHoverRadius: POINT_HOVER_RADIUS,
           pointBorderWidth: 0,
           pointHitRadius: 10,         // наведение работает
           pointBackgroundColor: ctx =>
@@ -719,12 +811,12 @@
         },
         scales: {
           x: {
-            grid: { color: '#3a4356' },
+            grid: { display: false },
             ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
           },
           y: {
             ...computeYBounds(initial),   // динамический масштаб по периоду
-            grid: { color: '#3a4356' },
+            grid: { display: false },
             ticks: { color: '#8b94a7' }
           }
         }
@@ -733,6 +825,8 @@
     setActivePeriod(activePeriod);            // подсветка + aria при загрузке
     updateStatsCard(initial, activePeriod);   // базовое значение = активный период
     updateRecordCards(initial);               // карточки рекордов по активному периоду
+    applyPointsVisibility();                  // точки по порогу/предпочтению
+    chart.update('none');                     // применить точки без анимации
   } catch (err) {
     console.error('Ошибка инициализации графика:', err);
   }
@@ -752,6 +846,21 @@
       updateRecordCards(filtered);
     });
   });
+
+  // --- Переключатель «Точки»: ручной выбор перекрывает авто-режим ----------
+  // Сохраняем ПРЕДПОЧТЕНИЕ, обратное текущему эффективному состоянию
+  // (on ? '0' : '1'): после явного выбора авто-порог больше не применяется,
+  // пока пользователь не изменит выбор. Обновление без анимации.
+  const pointsToggle = document.getElementById('pointsToggle');
+  if (pointsToggle) {
+    pointsToggle.addEventListener('change', () => {
+      const on = pointsVisibleFor(currentPeriodData.length);
+      try { localStorage.setItem(POINTS_STORAGE_KEY, on ? '0' : '1'); }
+      catch (err) {}
+      applyPointsVisibility();
+      if (chart) chart.update('none');
+    });
+  }
 </script>
 {% endif %}
 </body>

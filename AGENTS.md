@@ -67,8 +67,7 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 `MAX_BURN_PER_DAY = 120` (максимум сжигания штрафа за вечер). Используй эти
 константы в коде, не хардкодь значения в логике: они могут быть изменены по
 требованию владельца (в перспективе — через `config.json`, см. `BACKLOG.md`).
-Цветовые пороги штрафа (зелёный/красный) задаются в JS шаблона
-`templates/index.html`.
+Единая шкала окраски штрафа задаётся в JS шаблона `templates/index.html` (`penaltyColor`, DECISIONS 25); якорь шкалы сервер присылает полем `color_anchor`.
 
 ## 4. Git
 
@@ -191,4 +190,4 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 
 ---
 
-*Последнее обновление: v0.12.1*
+*Последнее обновление: v0.13.0*
