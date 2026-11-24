@@ -549,16 +549,24 @@
   // --- Динамические карточки рекордов (следуют за выбранным периодом) ---
   // Макcимальный штраф в периоде: значение fine и дата записи. Если
   // максимум встречается несколько раз — берём первую (самую раннюю) запись.
+  // Дата карточки рекордов: «DD.MM.YYYY», если дата не в текущем
+  // календарном году, иначе «DD.MM» (решение владельца 2026-11-24).
+  // full_date (ISO) приходит из build_chart_data; fallback — .date (DD.MM).
+  function fmtDayHuman(fullDate, fallback) {
+    const iso = String(fullDate || '').split('-');
+    if (iso.length !== 3) return fallback || '';
+    const dm = iso[2] + '.' + iso[1];
+    if (Number(iso[0]) === new Date().getFullYear()) return dm;
+    return dm + '.' + iso[0];
+  }
+
   function computeMaxFine(periodData) {
     if (!periodData || !periodData.length) return null;
     let best = periodData[0];
     for (const d of periodData) {
       if (d.fine > best.fine) best = d;
     }
-    // full_date ISO -> DD.MM.YYYY
-    const iso = String(best.full_date || '').split('-');
-    const date = iso.length === 3
-        ? iso[2] + '.' + iso[1] + '.' + iso[0] : (best.date || '');
+    const date = fmtDayHuman(best.full_date, best.date);
     return { value: best.fine, date: date };
   }
 
@@ -579,10 +587,12 @@
       }
     }
     if (bestLen === 0) return { count: 0, startDate: '', endDate: '' };
+    const first = periodData[bestStart];
+    const last = periodData[bestStart + bestLen - 1];
     return {
       count: bestLen,
-      startDate: periodData[bestStart].date,               // DD.MM
-      endDate: periodData[bestStart + bestLen - 1].date    // DD.MM
+      startDate: fmtDayHuman(first.full_date, first.date),
+      endDate: fmtDayHuman(last.full_date, last.date)
     };
   }
 
@@ -622,6 +632,10 @@
     const h = Math.floor(m / 60), mm = m % 60;
     return { min: m + ' мин', hm: mm ? (h + ' ч ' + mm + ' м') : (h + ' ч') };
   }
+
+  // Отклонение для тултипа: «H ч M м» при ≥60 мин, «N мин» ниже часа —
+  // единый формат со строкой «Штраф» (fmtFine).
+  const fmtDev = m => fmtFineParts(m).hm || fmtFineParts(m).min;
 
   // --- Единая шкала окраски штрафа (Приложение Б.3, DECISIONS 25) -------
   // Единственная копия формулы — JS; сервер присылает якорь одним полем
@@ -771,6 +785,12 @@
         }]
       },
       options: {
+        layout: {
+          // Константный боковой резерв под крайние точки (POINT_HOVER_RADIUS
+          // = 5 + полтолщины линии): область графика не зависит от
+          // переключателя «Точки», крайние точки не обрезаются кромкой.
+          padding: { left: 8, right: 8 }
+        },
         responsive: true,
         maintainAspectRatio: false,   // занимать всю высоту .chart-box
         interaction: { mode: 'index', intersect: false },
@@ -796,8 +816,8 @@
                   const hh = String(Math.floor(m / 60)).padStart(2, '0');
                   const mm = String(m % 60).padStart(2, '0');
                   const dev = d.delta || 0;        // отклонение от идеала
-                  const devTxt = dev > 0 ? ' (опоздание ' + dev + ' мин)'
-                               : dev < 0 ? ' (ранний на ' + (-dev) + ' мин)'
+                  const devTxt = dev > 0 ? ' (опоздание ' + fmtDev(dev) + ')'
+                               : dev < 0 ? ' (ранний на ' + fmtDev(-dev) + ')'
                                : ' (по идеалу)';
                   lines.push(' Отбой: ' + hh + ':' + mm + devTxt);
                 }

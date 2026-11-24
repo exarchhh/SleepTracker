@@ -309,3 +309,14 @@ def test_index_renders_color_anchor_and_data_fine(app_client, empty_db):
     assert "fine_class" not in html and "fine_class_row" not in html
     assert "gradientColors" not in html
     assert "SleepTracker v" + app_module.VERSION in html
+
+
+def test_chart_data_full_date_iso():
+    """build_chart_data отдаёт full_date (ISO) — источник года для
+    карточек дат в JS (№14, §2.1)."""
+    state = app_module.core.compute_state(
+        [{"day": TODAY.isoformat(), "bedtime": "23:30"}])
+    cd = app_module.build_chart_data(state)
+    assert cd, "chart_data пуст"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", cd[0]["full_date"]), \
+        "full_date не ISO-дата"
