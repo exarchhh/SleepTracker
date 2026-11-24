@@ -1,0 +1,23 @@
+{% for r in rows %}
+<tr>
+  <td>{{ r.day_human }}{% if r.level == 1 %} <span class="badge-night" data-tip="Отбой после полуночи. Запись относится к вечеру предыдущего дня: в истории указана дата вечера отбоя, а не календарная дата ночи">ночь</span>{% endif %}</td>
+  <td>
+    <form class="edit" method="post" action="/save">
+      <input type="hidden" name="old_day" value="{{ r.input_day }}">
+      <input type="hidden" name="old_bedtime" value="{{ r.input_bedtime }}">
+      <input type="hidden" name="day" value="{{ r.input_day }}">
+      <input type="time" name="bedtime" value="{{ r.input_bedtime }}">
+      <button type="submit">OK</button>
+    </form>
+  </td>
+  <td class="{{ r.delta_class }}">{{ r.delta_text }}{% if r.capped %}<span class="cap-info" data-tip="Сгорание упёрлось в дневной лимит — не больше {{ burn_limit }} минут за вечер; штраф не опускается ниже 0">i</span>{% endif %}</td>
+  <td class="mono" data-fine="{{ r.fine_after }}">{{ r.fine_after }}</td>
+  <td>
+    <form class="del" method="post" action="/delete">
+      <input type="hidden" name="day" value="{{ r.input_day }}">
+      <input type="hidden" name="bedtime" value="{{ r.input_bedtime }}">
+      <button type="submit">Удалить</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}

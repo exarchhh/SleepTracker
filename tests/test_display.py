@@ -128,6 +128,53 @@ def test_index_renders_night_badge_with_tooltip(app_client, empty_db):
     assert html.count('class="badge-night"') == 1, "badge не у одной записи"
 
 
+def test_fragment_returns_only_new_rows(app_client, empty_db):
+    """Fragment-режим (§2.4.1): ровно НОВЫЕ строки, не полная страница.
+
+    25 записей, показано 10, клик «еще 10»: GET /?fragment=1&show_count=20
+    &shown=10 -> state[5:15] reversed — 10 строк, которых не было.
+    """
+    _seed_history(empty_db)
+    html = app_client.get(
+        "/?fragment=1&show_count=20&shown=10").get_data(as_text=True)
+    assert html.count('data-fine="') == 10, "fragment отдал не 10 строк"
+    assert "<!DOCTYPE" not in html              # это не полная страница
+    assert "Показать" not in html               # блока подгрузки нет
+    assert 'data-fine-min' not in html          # карточек нет
+
+
+def test_fragment_shown_zero_boundary(app_client, empty_db):
+    """Граница shown=0 (§2.4.2): последние show_count строк; мусор -> то же.
+
+    state[-n:-0] был бы пуст — срез строится положительными индексами;
+    shown не коэрсится через _show_count: 0 легален («ничего не показано»).
+    """
+    _seed_history(empty_db)
+    html = app_client.get(
+        "/?fragment=1&show_count=10&shown=0").get_data(as_text=True)
+    assert html.count('data-fine="') == 10
+    html = app_client.get(
+        "/?fragment=1&show_count=10&shown=abc").get_data(as_text=True)
+    assert html.count('data-fine="') == 10
+
+
+def test_fragment_shown_at_or_beyond_count_empty(app_client, empty_db):
+    """shown >= show_count (§2.4.3): новых строк нет — пустой fragment."""
+    _seed_history(empty_db)
+    html = app_client.get(
+        "/?fragment=1&show_count=10&shown=10").get_data(as_text=True)
+    assert 'data-fine="' not in html
+
+
+def test_index_more_bar_data_attributes(app_client, empty_db):
+    """data-атрибуты .more-bar (§2.4.4): JS читает shown/total/step."""
+    _seed_history(empty_db)
+    html = app_client.get("/").get_data(as_text=True)
+    assert 'data-shown="10"' in html
+    assert 'data-total="25"' in html
+    assert 'data-step="10"' in html
+
+
 def test_anchor_empty_state_returns_floor():
     """Пустой state -> floor."""
     assert app_module.compute_color_anchor([], today=TODAY) \

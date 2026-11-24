@@ -48,7 +48,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.13.1"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
+VERSION = "0.14.0"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
 
 COLOR_WINDOW_DAYS = 90   # окно якоря окраски, дней (DECISIONS 25; кандидат в настройки — BACKLOG, Этап 2)
 COLOR_FLOOR_MIN = 120    # floor якоря окраски, минут (DECISIONS 25; кандидат в настройки)
@@ -292,30 +292,8 @@ def _show_count(raw):
     return n if n >= 1 else HISTORY_STEP
 
 
-@app.route("/")
-def index():
-    show_all = request.args.get("show_all", "0") == "1"
-    show_count = _show_count(request.args.get("show_count"))
-    conn = get_db()
-    try:
-        db_rows = conn.execute(
-            "SELECT day, bedtime FROM sleep_entries").fetchall()
-        # Память об удалённых ночах (ghost-блокировка, v0.10.0): вечер
-        # хранится как ключ эпохи (night_key) — превращаем его обратно
-        # в дату вечера для блока «Разрешить повторный ввод».
-        ghost_rows = conn.execute(
-            "SELECT evening_day FROM deleted_nights ORDER BY evening_day"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    entries = [{"day": r["day"], "bedtime": r["bedtime"]} for r in db_rows]
-    state = core.compute_state(entries)
-    total_count = len(state)
-    # История показывается от последней даты к более ранним; show_all=1
-    # перекрывает порцию show_count (рендерит всё, ссылка «еще» скрыта).
-    view = (state if show_all else state[-show_count:])[::-1]
-
+def _build_rows(view):
+    """Строки таблицы истории из state-записей (страница и fragment — общий код)."""
     rows = []
     for r in view:
         # Ночная запись (отбой 00:00-11:59) относится к вечеру ПРЕДЫДУЩЕГО
@@ -336,6 +314,49 @@ def index():
             delta_text, delta_class = "0", ""
         rows.append({**r, "day_human": day_human, "delta_text": delta_text,
                      "delta_class": delta_class})
+    return rows
+
+
+@app.route("/")
+def index():
+    show_all = request.args.get("show_all", "0") == "1"
+    show_count = _show_count(request.args.get("show_count"))
+    conn = get_db()
+    try:
+        db_rows = conn.execute(
+            "SELECT day, bedtime FROM sleep_entries").fetchall()
+        # Память об удалённых ночах (ghost-блокировка, v0.10.0): вечер
+        # хранится как ключ эпохи (night_key) — превращаем его обратно
+        # в дату вечера для блока «Разрешить повторный ввод».
+        ghost_rows = conn.execute(
+            "SELECT evening_day FROM deleted_nights ORDER BY evening_day"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    entries = [{"day": r["day"], "bedtime": r["bedtime"]} for r in db_rows]
+    state = core.compute_state(entries)
+    total_count = len(state)
+    if request.args.get("fragment") == "1":
+        # Fragment-режим (v0.14.0): только НОВЫЕ строки истории — записи,
+        # не попавшие в уже показанные shown. start/end через положительные
+        # индексы: state[-n:-0] пуст при shown=0, поэтому не используется.
+        # shown НЕ через _show_count: 0 легален («ничего не показано»).
+        try:
+            shown = int(request.args.get("shown", "0"))
+        except ValueError:
+            shown = 0
+        shown = max(0, shown)
+        start = max(0, total_count - show_count)
+        end = max(start, total_count - shown)
+        return render_template("_history_rows.html",
+                               rows=_build_rows(state[start:end][::-1]),
+                               burn_limit=core.MAX_BURN_PER_DAY)
+    # История показывается от последней даты к более ранним; show_all=1
+    # перекрывает порцию show_count (рендерит всё, ссылка «еще» скрыта).
+    view = (state if show_all else state[-show_count:])[::-1]
+
+    rows = _build_rows(view)
 
     if state:
         current_fine = state[-1]["fine_after"]
