@@ -75,12 +75,14 @@ def test_index_show_count_explicit_and_all(app_client, empty_db):
 
 
 def test_index_renders_pagination_links_and_fine_parts(app_client, empty_db):
-    """GET / (§2.8.4): обе ссылки подгрузки, data-fine-min/-hm, pointsToggle."""
+    """GET / (§2.9.1): обе кнопки в .more-bar, data-fine-min/-hm, pointsToggle."""
     _seed_history(empty_db)
     html = app_client.get("/").get_data(as_text=True)
     assert 'href="?show_count=20"' in html      # 10 + HISTORY_STEP
     assert "Показать еще 10" in html
     assert 'href="?show_all=1"' in html
+    assert 'class="more-bar"' in html           # разметка Б.1 (кнопки в баре)
+    assert " · <a" not in html                  # разделителя « · » больше нет
     assert 'data-fine-min="' in html            # карточка «Текущий штраф», стр. 1
     assert 'data-fine-hm="' in html             # строка 2 (приглушённая)
     assert 'id="pointsToggle"' in html          # переключатель «Точки»
@@ -89,7 +91,7 @@ def test_index_renders_pagination_links_and_fine_parts(app_client, empty_db):
 
 
 def test_index_renders_cap_info_only_for_capped(app_client, empty_db):
-    """ⓘ у «(cap)» (§2.8.4): только у capped-записи; лимит не хардкод.
+    """ⓘ у «(cap)» (§2.9.2): только у capped-записи, без нативного title.
 
     22:00 при штрафе 150 (delta -60 < MAX, сгорает часть, не до нуля) —
     uncapped; 20:00 при штрафе 90 (delta -180 > MAX) — capped.
@@ -101,6 +103,29 @@ def test_index_renders_cap_info_only_for_capped(app_client, empty_db):
     assert html.count('class="cap-info"') == 1, "cap-info не у одной записи"
     assert "(cap)" in html
     assert "не больше %d минут" % MAX_BURN_PER_DAY in html
+    assert 'title="Сгорание' not in html        # дублирующий тултип убран
+
+
+def test_index_renders_night_badge_with_tooltip(app_client, empty_db):
+    """Тег «ночь» (§2.9.3): data-tip только у level-1, у level-0 badge нет.
+
+    Записи вставляются напрямую в БД: 01:30 (ночь вечера 10-19) и 23:30
+    (вечер 10-19) — один вечер, через /save правило «один отбой на вечер»
+    заменило бы одну записи другой.
+    """
+    conn = sqlite3.connect(empty_db)
+    try:
+        conn.executemany(
+            "INSERT INTO sleep_entries (day, bedtime) VALUES (?, ?)",
+            [("2026-10-20", "01:30"),   # ночь вечера 10-19 (level 1)
+             ("2026-10-19", "23:30")])  # вечер 10-19 (level 0)
+        conn.commit()
+    finally:
+        conn.close()
+    html = app_client.get("/").get_data(as_text=True)
+    assert 'class="badge-night"' in html
+    assert 'data-tip="Отбой после полуночи' in html
+    assert html.count('class="badge-night"') == 1, "badge не у одной записи"
 
 
 def test_anchor_empty_state_returns_floor():

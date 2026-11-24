@@ -65,6 +65,7 @@
   .badge-night {
     background: #2b3560; color: #aab8ff; border-radius: 999px;
     font-size: 11px; padding: 2px 8px; margin-left: 6px; white-space: nowrap;
+    cursor: help;
   }
   .delta-pos { color: #f06a6a; }
   .delta-neg { color: #3ecf7a; }
@@ -119,9 +120,12 @@
   .app-dialog-actions button#appDialogOk:hover { background: #4b82f5; }
   .app-dialog-actions button#appDialogOk.danger { background: #c94040; }
   .app-dialog-actions button#appDialogOk.danger:hover { background: #e05555; }
-  a.more { color: #6f9bff; }
+  .more-bar { display: flex; justify-content: space-evenly; margin-top: 16px; }
+  a.more { color: #6f9bff; text-decoration: none; border: 1px solid #3a4356;
+           border-radius: 6px; padding: 6px 14px; }
+  a.more:hover { background: #3a4560; }
   /* Кружок-«i» у пометки «(cap)»: читается в 13px-строке таблицы;
-     подсказка показывается через .tip-bubble, title — нативный фолбэк (тач) */
+     подсказка показывается через .tip-bubble */
   .cap-info { display: inline-flex; width: 14px; height: 14px; align-items: center; justify-content: center; margin-left: 5px; border: 1px solid #8b94a7; border-radius: 50%; font-size: 10px; color: #8b94a7; cursor: help; }
   /* Бабл подсказки: fixed + pointer-events:none — не режется контейнером
      таблицы (overflow-x: auto); палитра — как тултип Chart.js */
@@ -250,7 +254,7 @@
       <tbody>
         {% for r in rows %}
         <tr>
-          <td>{{ r.day_human }}{% if r.level == 1 %} <span class="badge-night">ночь</span>{% endif %}</td>
+          <td>{{ r.day_human }}{% if r.level == 1 %} <span class="badge-night" data-tip="Отбой после полуночи. Запись относится к вечеру предыдущего дня: в истории указана дата вечера отбоя, а не календарная дата ночи">ночь</span>{% endif %}</td>
           <td>
             <form class="edit" method="post" action="/save">
               <input type="hidden" name="old_day" value="{{ r.input_day }}">
@@ -260,7 +264,7 @@
               <button type="submit">OK</button>
             </form>
           </td>
-          <td class="{{ r.delta_class }}">{{ r.delta_text }}{% if r.capped %}<span class="cap-info" data-tip="Сгорание упёрлось в дневной лимит — не больше {{ burn_limit }} минут за вечер; штраф не опускается ниже 0" title="Сгорание упёрлось в дневной лимит — не больше {{ burn_limit }} минут за вечер; штраф не опускается ниже 0">i</span>{% endif %}</td>
+          <td class="{{ r.delta_class }}">{{ r.delta_text }}{% if r.capped %}<span class="cap-info" data-tip="Сгорание упёрлось в дневной лимит — не больше {{ burn_limit }} минут за вечер; штраф не опускается ниже 0">i</span>{% endif %}</td>
           <td class="mono" data-fine="{{ r.fine_after }}">{{ r.fine_after }}</td>
           <td>
             <form class="del" method="post" action="/delete">
@@ -275,8 +279,9 @@
     </table>
     </div>
     {% if not show_all and rows|length < total_count %}
-    <div style="text-align:center; margin-top:16px;">
-      <a class="more" href="?show_count={{ show_count + history_step }}" style="text-decoration:none;">Показать еще {{ history_step }}</a> · <a class="more" href="?show_all=1" style="text-decoration:none;">Показать все ({{ total_count - rows|length }} записей)</a>
+    <div class="more-bar">
+      <a class="more" href="?show_count={{ show_count + history_step }}">Показать еще {{ history_step }}</a>
+      <a class="more" href="?show_all=1">Показать все ({{ total_count - rows|length }} записей)</a>
     </div>
     {% endif %}
   </div>
@@ -402,7 +407,7 @@
   // --- Всплывающая подсказка [data-tip]: общий bubble ----------------------
   // position: fixed + pointer-events: none — бабл не режется контейнером
   // таблицы (overflow-x: auto). Показ над элементом с clamp к краям окна,
-  // fallback снизу; атрибут title остаётся нативным фолбэком (тач).
+  // fallback снизу.
   (function () {
     var bubble = document.createElement('div');
     bubble.className = 'tip-bubble';
@@ -668,7 +673,8 @@
   // Перекраска статичных зон (тексты — двойной формат, цвет — единая
   // шкала). Ячейки истории [data-fine] — полный формат одной строкой +
   // окраска; карточка «Текущий штраф» — две строки: [data-fine-min] (строка
-  // 1) и [data-fine-hm] (строка 2, без цвета — приглушённая по CSS .sub).
+  // 1, с цветом единой шкалы — как «Макс. штраф» и история) и
+  // [data-fine-hm] (строка 2, без цвета — приглушённая по CSS .sub).
   // Без JS остаётся серверная разметка «N мин» без цвета — деградация.
   document.querySelectorAll('[data-fine]').forEach(el => {
     const v = parseInt(el.dataset.fine, 10);
@@ -680,6 +686,7 @@
     const v = parseInt(el.dataset.fineMin, 10);
     if (isNaN(v)) return;
     el.textContent = fmtFineParts(v).min;
+    el.style.color = penaltyColor(v, COLOR_ANCHOR);
   });
   document.querySelectorAll('[data-fine-hm]').forEach(el => {
     const v = parseInt(el.dataset.fineHm, 10);
