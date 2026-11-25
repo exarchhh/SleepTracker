@@ -191,4 +191,4 @@ git config user.email "38688838+exarchhh@users.noreply.github.com"
 
 ---
 
-*Последнее обновление: v0.14.1*
+*Последнее обновление: v0.15.0*

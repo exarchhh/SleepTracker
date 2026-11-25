@@ -1,4 +1,19 @@
 {% for r in rows %}
+{% if r.gap %}
+<tr class="gap-row">
+  <td>{{ r.day_human }} <span class="badge-gap" data-tip="Дата не заполнялась, применены значения по умолчанию: показано идеальное время отбоя {{ ideal_bedtime }}">пусто</span></td>
+  <td>
+    <form class="edit" method="post" action="/save">
+      <input type="hidden" name="day" value="{{ r.gap_iso }}">
+      <input type="time" name="bedtime" value="{{ ideal_bedtime }}">
+      <button type="submit">OK</button>
+    </form>
+  </td>
+  <td>—</td>
+  <td class="mono">—</td>
+  <td></td>
+</tr>
+{% else %}
 <tr>
   <td>{{ r.day_human }}{% if r.level == 1 %} <span class="badge-night" data-tip="Отбой после полуночи. Запись относится к вечеру предыдущего дня: в истории указана дата вечера отбоя, а не календарная дата ночи">ночь</span>{% endif %}</td>
   <td>
@@ -20,4 +35,5 @@
     </form>
   </td>
 </tr>
+{% endif %}
 {% endfor %}

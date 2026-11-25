@@ -67,6 +67,14 @@
     font-size: 11px; padding: 2px 8px; margin-left: 6px; white-space: nowrap;
     cursor: help;
   }
+  /* Строки пропусков (№15, DECISIONS 29): «пусто»-день — только слой
+     отображения; приглушённый серый текст и тег-бейдж с подсказкой */
+  tr.gap-row td { color: #6b7690; }
+  .badge-gap {
+    background: #2a3550; color: #8b94a7; border-radius: 999px;
+    font-size: 11px; padding: 2px 8px; margin-left: 6px; white-space: nowrap;
+    cursor: help;
+  }
   .delta-pos { color: #f06a6a; }
   .delta-neg { color: #3ecf7a; }
   form.edit { display: inline-flex; gap: 6px; align-items: center; }
@@ -177,6 +185,10 @@
       <div class="label">Лучший стрик (в периоде)</div>
       <div class="value green" id="bestStreakValue">—</div>
       <div class="label" id="bestStreakDates" style="font-size: 11px; margin-top: 4px;"></div>
+    </div>
+    <div class="card">
+      <div class="label">Пустых записей (в периоде)</div>
+      <div class="value" id="gapsCountValue">—</div>
     </div>
   </div>
 
@@ -491,7 +503,7 @@
   }
 
   function applyPointsVisibility() {
-    const n = currentPeriodData.length;
+    const n = realRows(currentPeriodData).length;
     const on = pointsVisibleFor(n);
     if (chart) {
       chart.data.datasets[0].pointRadius = on ? POINT_RADIUS : 0;
@@ -525,6 +537,12 @@
     return out.length ? out : chartData.slice(); // не показывать пустой график
   }
 
+  // Строки-пропуски (№15, DECISIONS 29) — только слой отображения: вся
+  // статистика и пороги точек считают только реальные записи.
+  function realRows(periodData) {
+    return (periodData || []).filter(d => !d.gap);
+  }
+
   // --- Динамический средний отбой (следует за выбранным периодом) -------
   // bedtime_min — минуты по шкале вечера (23:00 = 1380, как в compute_state;
   // послеполуночный отбой даёт > 1440). Если среднее перенесено за полночь,
@@ -543,7 +561,7 @@
     const lb = document.getElementById('avgBedtimeLabel');
     if (lb) lb.textContent = 'Средний отбой (' +
         (PERIOD_LABELS[period] || period) + ')';
-    if (el) el.textContent = computeAverageBedtime(periodData) || '—';
+    if (el) el.textContent = computeAverageBedtime(realRows(periodData)) || '—';
   }
 
   // --- Динамические карточки рекордов (следуют за выбранным периодом) ---
@@ -597,13 +615,16 @@
   }
 
   function updateRecordCards(periodData) {
-    const mf = computeMaxFine(periodData);
-    const bs = computeBestStreak(periodData);
+    const real = realRows(periodData);
+    const mf = computeMaxFine(real);
+    const bs = computeBestStreak(real);
+    const gaps = periodData ? periodData.length - real.length : 0;
     const mfVal = document.getElementById('maxFineValue');
     const mfDate = document.getElementById('maxFineDate');
     const bsVal = document.getElementById('bestStreakValue');
     const bsDates = document.getElementById('bestStreakDates');
     const mfSub = document.getElementById('maxFineSub');
+    const gcVal = document.getElementById('gapsCountValue');
     if (mfVal) {
       mfVal.textContent = mf ? fmtFineParts(mf.value).min : '—';
       mfVal.style.color = mf ? penaltyColor(mf.value, COLOR_ANCHOR) : '';
@@ -614,6 +635,7 @@
         ? bs.count + ' дн.' : '—';
     if (bsDates) bsDates.textContent = (bs && bs.count > 0)
         ? bs.startDate + ' - ' + bs.endDate : '';
+    if (gcVal) gcVal.textContent = String(gaps);
   }
 
   // --- Двойной формат штрафа (зеркало fmt_fine в app.py, Приложение Б.1) -
@@ -731,7 +753,7 @@
 
   function applyPeriodToChart(target, periodData) {
     currentPeriodData = periodData;      // тултип синхронен с нарисованным
-    const b = computeYBounds(periodData);
+    const b = computeYBounds(realRows(periodData));
     target.data.labels = periodData.map(d => d.date);
     target.data.datasets[0].data = periodData.map(d => d.fine);
     // ВАЖНО: в Chart.js v4 chart.options — геттер к config.options;
@@ -772,12 +794,17 @@
           pointHoverRadius: POINT_HOVER_RADIUS,
           pointBorderWidth: 0,
           pointHitRadius: 10,         // наведение работает
+          clip: 8,                    // резерв клипа за кромками области:
+                                      // hover-круг крайних точек не режется
+                                      // при любом dpr (наблюдение владельца
+                                      // 2026-11-24); геометрию не меняет
           pointBackgroundColor: ctx =>
               (ctx.parsed && typeof ctx.parsed.y === 'number')
                   ? penaltyColor(ctx.parsed.y, COLOR_ANCHOR)
                   : 'transparent',
           borderWidth: 2,
           fill: false,
+          spanGaps: false,            // «пусто»-точки рвут линию (№15, DECISIONS 29)
           segment: {                  // цвет сегмента по худшему из двух концов
             borderColor: ctx => penaltyColor(
               Math.max(ctx.p0.parsed.y, ctx.p1.parsed.y), COLOR_ANCHOR)
@@ -834,10 +861,18 @@
         scales: {
           x: {
             grid: { display: false },
-            ticks: { color: '#8b94a7', maxRotation: 45, autoSkip: true }
+            ticks: {
+              // Даты пропусков — приглушённый серый (№15, DECISIONS 29):
+              // скриптабельный цвет по признаку gap точки периода.
+              color: ctx => {
+                const d = currentPeriodData[ctx.index];
+                return d && d.gap ? '#6b7690' : '#8b94a7';
+              },
+              maxRotation: 45, autoSkip: true
+            }
           },
           y: {
-            ...computeYBounds(initial),   // динамический масштаб по периоду
+            ...computeYBounds(realRows(initial)),   // динамический масштаб по периоду
             grid: { display: false },
             ticks: { color: '#8b94a7' }
           }
@@ -879,7 +914,7 @@
   if (pointsToggle) {
     pointsToggle.addEventListener('change', () => {
       if (pointsToggle.disabled) return;      // форс-скрытие: выбор не меняется
-      const on = pointsVisibleFor(currentPeriodData.length);
+      const on = pointsVisibleFor(realRows(currentPeriodData).length);
       try { localStorage.setItem(POINTS_STORAGE_KEY, on ? '0' : '1'); }
       catch (err) {}
       applyPointsVisibility();

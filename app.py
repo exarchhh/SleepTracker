@@ -48,7 +48,7 @@ if getattr(sys, "frozen", False):
         except OSError:
             pass
 
-VERSION = "0.14.1"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
+VERSION = "0.15.0"          # MAJ.MIN.PATCH — единственная точка истины; синхронизация проверяется tests/test_version_sync.py
 
 COLOR_WINDOW_DAYS = 90   # окно якоря окраски, дней (DECISIONS 25; кандидат в настройки — BACKLOG, Этап 2)
 COLOR_FLOOR_MIN = 120    # floor якоря окраски, минут (DECISIONS 25; кандидат в настройки)
@@ -126,6 +126,12 @@ def build_chart_data(state):
     штрафа за вечер (fine_after − fine_before), нужен для тултипа. Логика
     расчёта штрафа НЕ затрагивается — только обогащение данных для
     фронтенда (тултипы).
+
+    Пропуски (№15, DECISIONS 29): между парами соседних записей вставляются
+    дисплейные «пусто»-точки (gap: True; fine/bedtime_min/delta/fine_gain
+    = None) для календарных дней строго между их эффективными датами
+    вечеров. Только слой отображения: линия рвётся (spanGaps: false), тик
+    даты пропуска серый; JS-статистика фильтрует их по признаку gap.
     """
     chart_data = []
     for idx, r in enumerate(state):
@@ -146,6 +152,17 @@ def build_chart_data(state):
                            "delta": r.get("delta", 0),
                            "fine_gain": r["fine_after"] - r["fine_before"],
                            "_order": idx})
+        if idx + 1 < len(state):
+            nxt = _effective_evening_date(state[idx + 1])
+            for gap_day in _gap_dates_between(d, nxt):
+                # «Пусто»-точка пропуска (№15, DECISIONS 29): только слой
+                # отображения — null-значения и признак gap; JS рвёт линию,
+                # серый тик, статистику не трогает.
+                chart_data.append({"date": gap_day.strftime("%d.%m"),
+                                   "full_date": gap_day.strftime("%Y-%m-%d"),
+                                   "fine": None, "bedtime_min": None,
+                                   "delta": None, "fine_gain": None,
+                                   "gap": True, "_order": idx})
     # Гарантируем сортировку по дате и хронологии внутри вечера
     # (вечерняя запись lvl0 раньше ночной lvl1). Chart.js рисует линию
     # только по отсортированным данным; state уже отсортирован, но
@@ -317,6 +334,56 @@ def _build_rows(view):
     return rows
 
 
+def _gap_dates_between(d1, d2):
+    """Календарные дни строго между d1 и d2 (обе границы исключены).
+
+    Единица слоя отображения пропусков (№15, DECISIONS 29): даты без
+    записей внутри диапазона данных. Нигде не хранятся, вычисляются при
+    рендере; compute_state и статистику не затрагивают.
+    """
+    out = []
+    cur = d1 + timedelta(days=1)
+    while cur < d2:
+        out.append(cur)
+        cur += timedelta(days=1)
+    return out
+
+
+def _gap_row(gap_day, ideal_bedtime):
+    """Дисплейная «пусто»-строка истории для дня пропуска (№15).
+
+    Только данные показа: ISO-дата для inline-формы OK, человекочитаемая
+    дата в формате реальных строк, признак gap для ветки шаблона.
+    """
+    return {
+        "gap": True,
+        "gap_iso": gap_day.isoformat(),
+        "day_human": gap_day.strftime("%d.%m.%Y") + " ("
+                     + core.DAY_MAP[gap_day.strftime("%a")] + ")",
+        "ideal_bedtime": ideal_bedtime,
+    }
+
+
+def _display_rows(state, eff_dates, lo, hi, ideal_bedtime):
+    """Строки истории окна state[lo:hi] с «пусто»-строками, новые сверху.
+
+    Для каждой записи i (от hi-1 к lo): строка записи, затем — если i-1
+    тоже в окне (i-1 >= lo) — «пусто»-строки пары (i-1, i) от поздних к
+    ранним. Пропуски пары, чья старшая запись за окном, не показываются
+    (строка «висела» бы без верхней границы); они появятся вместе со
+    следующим фрагментом подгрузки (§2.1.в).
+    """
+    real = _build_rows(state[lo:hi][::-1])
+    out = []
+    for pos, row in enumerate(real):
+        out.append(row)
+        i = hi - 1 - pos
+        if i - 1 >= lo:
+            gaps = _gap_dates_between(eff_dates[i - 1], eff_dates[i])
+            out.extend(_gap_row(d, ideal_bedtime) for d in reversed(gaps))
+    return out
+
+
 @app.route("/")
 def index():
     show_all = request.args.get("show_all", "0") == "1"
@@ -337,6 +404,11 @@ def index():
     entries = [{"day": r["day"], "bedtime": r["bedtime"]} for r in db_rows]
     state = core.compute_state(entries)
     total_count = len(state)
+    # Идеальное время отбоя для «пусто»-строк (№15, DECISIONS 29): из
+    # константы ядра, нигде не хранится (после config.json — из настроек).
+    ideal_bedtime = "%02d:%02d" % divmod(core.IDEAL_MINUTES, 60)
+    # Эффективные даты вечеров — общая основа пропусков истории и графика.
+    eff_dates = [_effective_evening_date(r) for r in state]
     if request.args.get("fragment") == "1":
         # Fragment-режим (v0.14.0): только НОВЫЕ строки истории — записи,
         # не попавшие в уже показанные shown. start/end через положительные
@@ -349,14 +421,22 @@ def index():
         shown = max(0, shown)
         start = max(0, total_count - show_count)
         end = max(start, total_count - shown)
-        return render_template("_history_rows.html",
-                               rows=_build_rows(state[start:end][::-1]),
-                               burn_limit=core.MAX_BURN_PER_DAY)
+        rows = _display_rows(state, eff_dates, start, end, ideal_bedtime)
+        if rows and end < total_count:
+            # Граница показа: пара (end-1, end) — первая НОВАЯ запись и
+            # старейшая уже показанная. Её «пусто»-строки идут в начале
+            # фрагмента: tbody растёт вниз, они встают между показанной
+            # записью state[end] и первой новой state[end-1].
+            boundary = _gap_dates_between(eff_dates[end - 1], eff_dates[end])
+            rows = [_gap_row(d, ideal_bedtime)
+                    for d in reversed(boundary)] + rows
+        return render_template("_history_rows.html", rows=rows,
+                               burn_limit=core.MAX_BURN_PER_DAY,
+                               ideal_bedtime=ideal_bedtime)
     # История показывается от последней даты к более ранним; show_all=1
     # перекрывает порцию show_count (рендерит всё, ссылка «еще» скрыта).
-    view = (state if show_all else state[-show_count:])[::-1]
-
-    rows = _build_rows(view)
+    lo = 0 if show_all else max(0, total_count - show_count)
+    rows = _display_rows(state, eff_dates, lo, total_count, ideal_bedtime)
 
     if state:
         current_fine = state[-1]["fine_after"]
@@ -410,6 +490,7 @@ def index():
         show_count=show_count,
         history_step=HISTORY_STEP,
         burn_limit=core.MAX_BURN_PER_DAY,
+        ideal_bedtime=ideal_bedtime,
         today=_date.today().isoformat(),
         version=VERSION,
         ghosted_nights=ghosted_nights,

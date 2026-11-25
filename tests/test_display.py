@@ -320,3 +320,109 @@ def test_chart_data_full_date_iso():
     assert cd, "chart_data пуст"
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", cd[0]["full_date"]), \
         "full_date не ISO-дата"
+
+
+def test_chart_data_gaps_between_records():
+    """build_chart_data: «пусто»-точки для дней строго между соседними
+    записями; null-значения и признак gap (№15, DECISIONS 29)."""
+    state = app_module.core.compute_state([
+        {"day": "2026-11-10", "bedtime": "23:30"},
+        {"day": "2026-11-13", "bedtime": "22:40"}])
+    cd = app_module.build_chart_data(state)
+    gaps = [p for p in cd if p.get("gap")]
+    assert [p["full_date"] for p in gaps] == ["2026-11-11", "2026-11-12"]
+    assert all(p["fine"] is None and p["bedtime_min"] is None
+               and p["delta"] is None and p["fine_gain"] is None
+               for p in gaps)
+    real = [p for p in cd if not p.get("gap")]
+    assert [p["full_date"] for p in real] == ["2026-11-10", "2026-11-13"]
+
+
+def test_history_renders_gap_rows(app_client, empty_db):
+    """История: «пусто»-строки между записями, обе в окне показа; тег с
+    подсказкой и inline-форма OK с идеальным временем (№15)."""
+    conn = sqlite3.connect(empty_db)
+    try:
+        conn.executemany(
+            "INSERT INTO sleep_entries (day, bedtime) VALUES (?, ?)",
+            [("2026-11-10", "23:30"), ("2026-11-13", "22:40")])
+        conn.commit()
+    finally:
+        conn.close()
+    html = app_client.get("/").get_data(as_text=True)
+    assert html.count('class="badge-gap"') == 2
+    assert "11.11.2026" in html and "12.11.2026" in html
+    assert "Дата не заполнялась, применены значения по умолчанию" in html
+    assert 'name="day" value="2026-11-11"' in html   # форма OK дня пропуска
+    assert html.count('value="23:00">') == 2         # идеал в обеих формах
+
+
+def test_history_gap_needs_both_neighbors(app_client, empty_db):
+    """«Пусто»-строка показывается, только если ОБЕ записи пары в окне:
+    show_count=1 -> пропусков нет (правило «не висит», №15)."""
+    conn = sqlite3.connect(empty_db)
+    try:
+        conn.executemany(
+            "INSERT INTO sleep_entries (day, bedtime) VALUES (?, ?)",
+            [("2026-11-10", "23:30"), ("2026-11-13", "22:40")])
+        conn.commit()
+    finally:
+        conn.close()
+    html = app_client.get("/?show_count=1").get_data(as_text=True)
+    assert 'class="badge-gap"' not in html
+    assert "11.11.2026" not in html
+
+
+def test_history_fragment_boundary_gaps(app_client, empty_db):
+    """Fragment: пропуски граничной пары ровно один раз, до первой новой
+    строки; порядок показа — от поздних к ранним (№15)."""
+    conn = sqlite3.connect(empty_db)
+    try:
+        conn.executemany(
+            "INSERT INTO sleep_entries (day, bedtime) VALUES (?, ?)",
+            [("2026-11-10", "23:30"), ("2026-11-13", "22:40"),
+             ("2026-11-15", "23:10")])
+        conn.commit()
+    finally:
+        conn.close()
+    page = app_client.get("/?show_count=2").get_data(as_text=True)
+    assert page.count('class="badge-gap"') == 1      # пара (13.11, 15.11): 14.11
+    frag = app_client.get(
+        "/?fragment=1&show_count=3&shown=2").get_data(as_text=True)
+    assert frag.count('class="badge-gap"') == 2      # граничная пара: 12.11, 11.11
+    assert frag.index("12.11") < frag.index("11.11")  # от поздних к ранним
+    assert "13.11" not in frag                       # уже показана, дубля нет
+    assert "10.11" in frag                           # первая новая строка
+
+
+def test_gap_row_ok_creates_record(app_client, empty_db):
+    """OK на «пусто»-строке: POST /save (дата пропуска + идеал 23:00)
+    создаёт реальную запись, пропуск исчезает (№15, DECISIONS 29)."""
+    conn = sqlite3.connect(empty_db)
+    try:
+        conn.executemany(
+            "INSERT INTO sleep_entries (day, bedtime) VALUES (?, ?)",
+            [("2026-11-10", "23:30"), ("2026-11-13", "22:40")])
+        conn.commit()
+    finally:
+        conn.close()
+    resp = app_client.post("/save", data={"day": "2026-11-11",
+                                          "bedtime": "23:00"})
+    assert resp.status_code == 302
+    html = app_client.get("/").get_data(as_text=True)
+    assert html.count('class="badge-gap"') == 1      # остался только 12.11
+    assert 'data-fine="30"' in html                  # 23:00 -> delta 0, штраф не растёт
+
+
+def test_index_renders_gaps_card_and_chart_markers(app_client, empty_db):
+    """Карточка «Пустых записей (в периоде)» и JS-маркеры пропусков:
+    spanGaps: false, clip: 8, realRows, CSS gap-row (№15)."""
+    app_client.post("/save", data={"day": "2026-11-10", "bedtime": "23:30"})
+    app_client.post("/save", data={"day": "2026-11-13", "bedtime": "22:40"})
+    html = app_client.get("/").get_data(as_text=True)
+    assert 'id="gapsCountValue"' in html
+    assert "Пустых записей (в периоде)" in html
+    assert "spanGaps: false" in html
+    assert "clip: 8" in html
+    assert "realRows" in html
+    assert "tr.gap-row" in html
